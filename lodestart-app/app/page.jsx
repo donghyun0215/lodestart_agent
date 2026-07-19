@@ -1192,12 +1192,13 @@ BODY:
       const data = await res.json();
       const ns = { ...sendStatus };
       let ok = 0;
+      const cid = campaignId || (await getOrCreateCampaignId());
       (data.results || []).forEach((r) => {
         if (r.ok) {
           ns[r.contactId] = "sent";
           ok += 1;
           const c = contacts.find((x) => x.id === r.contactId);
-          if (campaignId && c) persistSend(campaignId, c, { status: "sent" });
+          if (cid && c) persistSend(cid, c, { status: "sent" });
         }
       });
       setSendStatus(ns);
@@ -1257,6 +1258,7 @@ BODY:
       const data = await res.json();
       const ns = { ...sendStatus };
       let changed = 0;
+      const cid = campaignId || (await getOrCreateCampaignId());
       (data.results || []).forEach((r) => {
         const c = contacts.find((x) => x.id === r.contactId);
         let newStatus = null;
@@ -1265,7 +1267,7 @@ BODY:
         if (newStatus && ns[r.contactId] !== newStatus) {
           ns[r.contactId] = newStatus;
           changed += 1;
-          if (campaignId && c) persistSend(campaignId, c, { status: newStatus });
+          if (cid && c) persistSend(cid, c, { status: newStatus });
         }
       });
       if (changed) setSendStatus(ns);
@@ -1288,10 +1290,11 @@ BODY:
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [tab, gmail, campaignId]);
 
-  const setStatus = (id, st) => {
+  const setStatus = async (id, st) => {
     setSendStatus((prev) => ({ ...prev, [id]: st }));
     const c = contacts.find((x) => x.id === id);
-    if (campaignId && c) persistSend(campaignId, c, { status: st });
+    const cid = campaignId || (await getOrCreateCampaignId());
+    if (cid && c) persistSend(cid, c, { status: st });
   };
 
   // Manually force a contact to the top of the ranking — bypasses the AI

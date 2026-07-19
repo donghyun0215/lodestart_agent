@@ -38,15 +38,19 @@ async function draftExists(token, draftId) {
 
 async function threadHasReply(token, threadId) {
   const res = await fetch(
-    `https://gmail.googleapis.com/gmail/v1/users/me/threads/${threadId}?format=metadata&metadataHeaders=From`,
+    `https://gmail.googleapis.com/gmail/v1/users/me/threads/${threadId}?format=minimal`,
     { headers: { authorization: `Bearer ${token}` } }
   );
   if (res.status === 401) return { replied: null, authFail: true };
   if (!res.ok) return { replied: false, authFail: false };
   const j = await res.json();
-  const msgs = j.messages || [];
-  const replied = msgs.some((m) => !(m.labelIds || []).includes("SENT"));
-  return { replied, authFail: false };
+  // A reply always appends a genuinely new message to the thread, so the
+  // message COUNT is the reliable signal — not labels. (Checking for a
+  // missing "SENT" label was wrong: an unsent draft's own placeholder
+  // message also lacks "SENT", which made every un-sent draft look like
+  // it already had a reply.)
+  const count = (j.messages || []).length;
+  return { replied: count > 1, authFail: false };
 }
 
 export async function POST(req) {
