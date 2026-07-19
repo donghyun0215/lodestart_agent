@@ -100,6 +100,7 @@ const K = {
   edits: "ld:edits",
   startups: "ld:startups",
   prefs: "ld:prefs", // last audience/lang selected — helps land back on the right view after refresh
+  draftStartup: "ld:draftStartup", // whatever's currently typed, saved continuously — not just on "저장" click
 };
 
 /* ------------------------------- storage ------------------------------- */
@@ -610,7 +611,13 @@ export default function App() {
       setEdits(await loadKey(K.edits, []));
       const s = await loadKey(K.startups, []);
       setStartups(s);
-      if (s.length) setStartup(s[s.length - 1]);
+      // Whatever was last typed (even if "프로필 저장" was never clicked)
+      // takes priority over the curated saved-profiles list — this is what
+      // makes the campaign-restore effect below able to find its match
+      // after a refresh.
+      const draft = await loadKey(K.draftStartup, null);
+      if (draft && draft.name) setStartup(draft);
+      else if (s.length) setStartup(s[s.length - 1]);
       const p = await loadKey(K.prefs, null);
       if (p) {
         if (p.audience) setAudience(p.audience);
@@ -620,6 +627,14 @@ export default function App() {
       setReady(true);
     })();
   }, []);
+
+  // Autosave every keystroke in the startup profile — not just on
+  // "프로필 저장" — so typing a name and immediately matching/drafting
+  // still survives a refresh.
+  useEffect(() => {
+    if (!ready) return;
+    saveKey(K.draftStartup, startup);
+  }, [ready, startup]);
 
   // Remember the last tab/audience/lang picked, so a refresh lands back on
   // the same screen instead of always bouncing to "1 · 컨택"
