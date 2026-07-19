@@ -1293,6 +1293,32 @@ BODY:
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [tab, gmail, campaignId]);
 
+  // Wipe the tracking state for this campaign: forget which Gmail drafts we
+  // were watching and reset every status back to "draft". Use this after
+  // manually clearing the Gmail drafts folder, so stale draft ids from old
+  // pushes don't keep the dashboard pointing at messages that no longer exist.
+  const resetCampaignTracking = async () => {
+    if (
+      !window.confirm(
+        "이 캠페인의 추적 정보를 초기화합니다.\n" +
+          "- Gmail 초안 연결 해제\n- 보냄/회신 상태 모두 초기화\n\n" +
+          "초안 내용과 매칭 점수는 그대로 유지됩니다. 계속할까요?"
+      )
+    )
+      return;
+    setGmailDraftIds({});
+    setThreadIds({});
+    setSendStatus({});
+    setPushMsg("추적 정보를 초기화했습니다. Gmail 초안함도 비웠는지 확인하세요.");
+    if (campaignId) {
+      const { error } = await supabase
+        .from("sends")
+        .update({ gmail_draft_id: null, thread_id: null, status: "draft" })
+        .eq("campaign_id", campaignId);
+      if (error) setErr("초기화 저장 실패: " + error.message);
+    }
+  };
+
   const setStatus = async (id, st) => {
     setSendStatus((prev) => ({ ...prev, [id]: st }));
     const c = contacts.find((x) => x.id === id);
@@ -2589,6 +2615,9 @@ BODY:
                         disabled={syncing || !Object.keys(gmailDraftIds).length}
                       >
                         {syncing ? "확인 중…" : "Gmail 동기화"}
+                      </Btn>
+                      <Btn small kind="quiet" onClick={resetCampaignTracking}>
+                        추적 초기화
                       </Btn>
                     </div>
                   </div>
