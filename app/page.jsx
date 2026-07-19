@@ -540,22 +540,29 @@ export default function App() {
   // Never blocks the UI — failures are logged but don't interrupt the flow.
   const persistSend = async (cid, contact, extra) => {
     if (!cid || !contact) return;
-    try {
-      await supabase.from("sends").upsert(
-        {
-          campaign_id: cid,
-          contact_id: contact.id,
-          email: contact.email,
-          org: contact.org,
-          person: contact.person,
-          fit: scores[contact.id]?.score ?? null,
-          updated_at: new Date().toISOString(),
-          ...extra,
-        },
-        { onConflict: "campaign_id,contact_id" }
+    const { error } = await supabase.from("sends").upsert(
+      {
+        campaign_id: cid,
+        contact_id: contact.id,
+        email: contact.email,
+        org: contact.org,
+        person: contact.person,
+        fit: scores[contact.id]?.score ?? null,
+        updated_at: new Date().toISOString(),
+        ...extra,
+      },
+      { onConflict: "campaign_id,contact_id" }
+    );
+    if (error) {
+      // Supabase doesn't throw on failure — it returns { error } — so this
+      // was silently swallowed before. Surface it so a save failure is
+      // actually visible instead of just vanishing.
+      console.error("persistSend failed", error);
+      setErr(
+        "⚠ 저장 실패: " +
+          error.message +
+          " — Supabase에서 supabase_schema.sql을 다시 실행했는지 확인하세요."
       );
-    } catch (e) {
-      console.error("persistSend failed", e);
     }
   };
 
@@ -631,20 +638,22 @@ export default function App() {
     let cancelled = false;
     (async () => {
       try {
-        const { data: camp } = await supabase
+        const { data: camp, error: campErr } = await supabase
           .from("campaigns")
           .select("id")
           .eq("startup", startup.name)
           .eq("audience", audience)
           .order("created_at", { ascending: false })
           .limit(1);
+        if (campErr) throw campErr;
         if (cancelled || !camp || !camp.length) return;
         const cid = camp[0].id;
         setCampaignId(cid);
-        const { data: rows } = await supabase
+        const { data: rows, error: rowsErr } = await supabase
           .from("sends")
           .select("*")
           .eq("campaign_id", cid);
+        if (rowsErr) throw rowsErr;
         if (cancelled || !rows || !rows.length) return;
         const sc = {}, dr = {}, st = {}, gd = {};
         rows.forEach((r) => {
@@ -663,6 +672,7 @@ export default function App() {
         }
       } catch (e) {
         console.error("campaign restore failed", e);
+        setErr("⚠ 복원 실패: " + e.message);
       }
     })();
     return () => {
