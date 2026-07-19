@@ -608,17 +608,19 @@ export default function App() {
       if (p) {
         if (p.audience) setAudience(p.audience);
         if (p.lang) setLang(p.lang);
+        if (p.tab) setTab(p.tab);
       }
       setReady(true);
     })();
   }, []);
 
-  // Remember the last audience/lang picked, so a refresh lands back on the
-  // same view (and so the campaign-restore effect below knows where to look).
+  // Remember the last tab/audience/lang picked, so a refresh lands back on
+  // the same screen instead of always bouncing to "1 · 컨택"
+  // (and so the campaign-restore effect below knows where to look).
   useEffect(() => {
     if (!ready) return;
-    saveKey(K.prefs, { audience, lang });
-  }, [ready, audience, lang]);
+    saveKey(K.prefs, { audience, lang, tab });
+  }, [ready, audience, lang, tab]);
 
   // Restore a previous campaign's matches/drafts/statuses from the DB when
   // landing on a startup+audience that already has saved work. Without
