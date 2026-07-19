@@ -32,17 +32,31 @@ create table if not exists campaigns (
 );
 
 create table if not exists sends (
-  id          uuid primary key default gen_random_uuid(),
-  created_at  timestamptz default now(),
-  campaign_id uuid references campaigns(id) on delete cascade,
-  email       text,
-  org         text,
-  person      text,
-  fit         int,
-  subject     text,
-  body        text,
-  status      text default 'draft'   -- draft | sent | replied | no_interest
+  id             uuid primary key default gen_random_uuid(),
+  created_at     timestamptz default now(),
+  updated_at     timestamptz default now(),
+  campaign_id    uuid references campaigns(id) on delete cascade,
+  contact_id     uuid references contacts(id) on delete cascade,
+  email          text,
+  org            text,
+  person         text,
+  fit            int,
+  subject        text,
+  body           text,
+  status         text default 'draft',   -- draft | sent | replied | no_interest
+  gmail_draft_id text
 );
+
+-- Migration for anyone who ran an earlier version of this file where
+-- `sends` already existed without these columns.
+alter table sends add column if not exists contact_id     uuid references contacts(id) on delete cascade;
+alter table sends add column if not exists gmail_draft_id text;
+alter table sends add column if not exists updated_at     timestamptz default now();
+
+-- one row per (campaign, contact) — lets us upsert instead of duplicating
+-- rows every time a draft is regenerated or a status changes.
+create unique index if not exists sends_campaign_contact_uidx
+  on sends (campaign_id, contact_id);
 
 alter table contacts  enable row level security;
 alter table campaigns enable row level security;

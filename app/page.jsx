@@ -99,6 +99,7 @@ const K = {
   tone: "ld:tone",
   edits: "ld:edits",
   startups: "ld:startups",
+  prefs: "ld:prefs", // last audience/lang selected — helps land back on the right view after refresh
 };
 
 /* ------------------------------- storage ------------------------------- */
@@ -195,6 +196,17 @@ function fileToBase64(file) {
 
 // Drafts come back as plain text with SUBJECT:/BODY: markers.
 // Avoids all JSON escaping problems with newlines and Korean quotes.
+// Plain-text emails should never contain markdown — Gmail renders it literally
+// (asterisks etc. show up as-is), which looks broken and spam-like.
+function stripMarkdown(s) {
+  return (s || "")
+    .replace(/\*\*(.+?)\*\*/g, "$1") // **bold**
+    .replace(/\*(.+?)\*/g, "$1")     // *italic*
+    .replace(/^#{1,6}\s+/gm, "")     // # headings
+    .replace(/^[-*]\s+/gm, "• ");    // - bullets -> plain bullet
+
+}
+
 function parseDraft(text) {
   const t = (text || "").replace(/```/g, "").trim();
   const sm = t.match(/SUBJECT:\s*(.+)/i);
@@ -208,7 +220,7 @@ function parseDraft(text) {
     body = lines.slice(1).join("\n").trim();
   }
   if (!subject) subject = "(제목 없음)";
-  return { subject: subject.trim(), body: body.trim() };
+  return { subject: stripMarkdown(subject).trim(), body: stripMarkdown(body).trim() };
 }
 
 function parseJSON(text) {
@@ -295,6 +307,8 @@ const Btn = ({ children, onClick, kind = "primary", disabled, small, icon: Icon 
         letterSpacing: "0.01em",
         transition: "all .15s",
         transform: hover && !disabled ? "translateY(-1px)" : "none",
+        whiteSpace: "nowrap",
+        flexShrink: 0,
       }}
     >
       {Icon && <Icon size={small ? 12 : 14} strokeWidth={2.3} />}
@@ -478,7 +492,8 @@ export default function App() {
   });
 
   const [audience, setAudience] = useState("CORPORATE_KR");
-  const [limit, setLimit] = useState(15);
+  const [limit, setLimit] = useState("15"); // free text while typing — validated on run, not per keystroke
+  const limitNum = parseInt(limit, 10);
   const [lang, setLang] = useState("EN"); // EN | KO
   const [scores, setScores] = useState({});
   const [drafts, setDrafts] = useState({});
@@ -491,6 +506,58 @@ export default function App() {
   const [gmailDraftIds, setGmailDraftIds] = useState({}); // contact id -> gmail draft id
   const [pushMsg, setPushMsg] = useState("");
   const [usage, setUsage] = useState({ in: 0, out: 0, calls: 0 });
+  const [campaignId, setCampaignId] = useState(null);
+  const [restoredNote, setRestoredNote] = useState("");
+
+  // Find the most recent campaign for this startup+audience, or create one.
+  // Campaign identity is (startup name, audience) — regenerating in a
+  // different language just updates the same campaign's rows.
+  const getOrCreateCampaignId = async () => {
+    if (!startup.name) return null;
+    const { data: found, error: findErr } = await supabase
+      .from("campaigns")
+      .select("id")
+      .eq("startup", startup.name)
+      .eq("audience", audience)
+      .order("created_at", { ascending: false })
+      .limit(1);
+    if (findErr) throw findErr;
+    if (found && found.length) {
+      setCampaignId(found[0].id);
+      return found[0].id;
+    }
+    const { data: created, error: createErr } = await supabase
+      .from("campaigns")
+      .insert({ startup: startup.name, audience, lang })
+      .select()
+      .single();
+    if (createErr) throw createErr;
+    setCampaignId(created.id);
+    return created.id;
+  };
+
+  // Write-through: upsert one contact's send row (draft content + status).
+  // Never blocks the UI — failures are logged but don't interrupt the flow.
+  const persistSend = async (cid, contact, extra) => {
+    if (!cid || !contact) return;
+    try {
+      await supabase.from("sends").upsert(
+        {
+          campaign_id: cid,
+          contact_id: contact.id,
+          email: contact.email,
+          org: contact.org,
+          person: contact.person,
+          fit: scores[contact.id]?.score ?? null,
+          updated_at: new Date().toISOString(),
+          ...extra,
+        },
+        { onConflict: "campaign_id,contact_id" }
+      );
+    } catch (e) {
+      console.error("persistSend failed", e);
+    }
+  };
 
   // Register the usage hook so claude()/claudeWithDoc() can report token counts.
   useEffect(() => {
@@ -516,6 +583,19 @@ export default function App() {
     if (q.get("gmail") === "error") setGmail("error");
   }, []);
 
+  // The gmail=connected query param only shows up right after the OAuth
+  // redirect — on a normal refresh the badge would fall back to "Gmail
+  // 연결" even though the cookie is still valid. Ask the server what's
+  // actually true.
+  useEffect(() => {
+    fetch("/api/auth/status")
+      .then((r) => r.json())
+      .then((d) => {
+        if (d.connected) setGmail((prev) => (prev === "error" ? prev : "connected"));
+      })
+      .catch(() => {});
+  }, []);
+
   useEffect(() => {
     (async () => {
       setSender(await loadKey(K.sender, DEFAULT_SENDER));
@@ -524,9 +604,70 @@ export default function App() {
       const s = await loadKey(K.startups, []);
       setStartups(s);
       if (s.length) setStartup(s[s.length - 1]);
+      const p = await loadKey(K.prefs, null);
+      if (p) {
+        if (p.audience) setAudience(p.audience);
+        if (p.lang) setLang(p.lang);
+      }
       setReady(true);
     })();
   }, []);
+
+  // Remember the last audience/lang picked, so a refresh lands back on the
+  // same view (and so the campaign-restore effect below knows where to look).
+  useEffect(() => {
+    if (!ready) return;
+    saveKey(K.prefs, { audience, lang });
+  }, [ready, audience, lang]);
+
+  // Restore a previous campaign's matches/drafts/statuses from the DB when
+  // landing on a startup+audience that already has saved work. Without
+  // this, refreshing the page wiped everything except the contacts DB —
+  // this is what fixes that.
+  useEffect(() => {
+    if (!ready || !startup.name || !contacts.length) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const { data: camp } = await supabase
+          .from("campaigns")
+          .select("id")
+          .eq("startup", startup.name)
+          .eq("audience", audience)
+          .order("created_at", { ascending: false })
+          .limit(1);
+        if (cancelled || !camp || !camp.length) return;
+        const cid = camp[0].id;
+        setCampaignId(cid);
+        const { data: rows } = await supabase
+          .from("sends")
+          .select("*")
+          .eq("campaign_id", cid);
+        if (cancelled || !rows || !rows.length) return;
+        const sc = {}, dr = {}, st = {}, gd = {};
+        rows.forEach((r) => {
+          if (r.fit !== null && r.fit !== undefined) sc[r.contact_id] = { score: r.fit, reason: "" };
+          if (r.subject || r.body) dr[r.contact_id] = { subject: r.subject || "", body: r.body || "", edited: false };
+          if (r.status) st[r.contact_id] = r.status;
+          if (r.gmail_draft_id) gd[r.contact_id] = r.gmail_draft_id;
+        });
+        // Only fill in if we don't already have live, unsaved work in memory.
+        setScores((p) => (Object.keys(p).length ? p : sc));
+        setDrafts((p) => (Object.keys(p).length ? p : dr));
+        setSendStatus((p) => (Object.keys(p).length ? p : st));
+        setGmailDraftIds((p) => (Object.keys(p).length ? p : gd));
+        if (Object.keys(dr).length) {
+          setRestoredNote(`이전 캠페인을 복원했습니다 — 초안 ${Object.keys(dr).length}건.`);
+        }
+      } catch (e) {
+        console.error("campaign restore failed", e);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [ready, contacts.length, startup.name, audience]);
 
   /* ---------------------------- csv ingest ---------------------------- */
   const [contactQuery, setContactQuery] = useState("");
@@ -866,7 +1007,11 @@ ${tone.rules}
 Never use these words: ${tone.banned}
 ${fewShot()}
 
-OUTPUT FORMAT — follow exactly, no JSON, no markdown, no commentary:
+OUTPUT FORMAT — follow exactly:
+- Plain text email body only. This is NOT markdown — it will be sent as-is in a real email client.
+- NEVER wrap words in asterisks, underscores, or # symbols for emphasis (no **bold**, no *italic*, no # headings). If you want to emphasize the startup name, just write it plainly.
+- No JSON, no code fences, no commentary outside the two fields below.
+
 SUBJECT: <the subject line on one line>
 BODY:
 <the full email body, as many lines as needed>`;
@@ -876,7 +1021,11 @@ BODY:
   };
 
   const runDrafts = async () => {
-    const top = scored.slice(0, limit);
+    if (!Number.isFinite(limitNum) || limitNum <= 0) {
+      setErr("초안 개수는 1 이상의 숫자여야 합니다.");
+      return;
+    }
+    const top = scored.slice(0, limitNum);
     if (!top.length) return;
     setBusy("draft");
     setProgress(0);
@@ -884,6 +1033,7 @@ BODY:
     const next = { ...drafts };
     const CONCURRENCY = 4; // real API key here, higher tier than the sandbox demo
     try {
+      const cid = await getOrCreateCampaignId();
       let done = 0;
       for (let w = 0; w < top.length; w += CONCURRENCY) {
         const wave = top.slice(w, w + CONCURRENCY);
@@ -894,6 +1044,11 @@ BODY:
               done += 1;
               setDrafts({ ...next });
               setProgress(Math.round((done / top.length) * 100));
+              persistSend(cid, c, {
+                subject: d.subject,
+                body: d.body,
+                status: sendStatus[c.id]?.replace("draft_in_gmail", "draft") || "draft",
+              });
             })
           )
         );
@@ -952,10 +1107,15 @@ BODY:
       const ok = (data.results || []).filter((r) => r.ok).length;
       const ns = { ...sendStatus };
       const ids = { ...gmailDraftIds };
+      const cid = await getOrCreateCampaignId();
       (data.results || []).forEach((r, i) => {
         if (r.ok) {
           ns[rows[i].id] = ns[rows[i].id] || "draft_in_gmail";
-          if (r.draftId) ids[rows[i].id] = r.draftId;
+          if (r.draftId) {
+            ids[rows[i].id] = r.draftId;
+            const c = contacts.find((x) => x.id === rows[i].id);
+            if (cid && c) persistSend(cid, c, { gmail_draft_id: r.draftId, status: "draft" });
+          }
         }
       });
       setSendStatus(ns);
@@ -995,6 +1155,8 @@ BODY:
         if (r.ok) {
           ns[r.contactId] = "sent";
           ok += 1;
+          const c = contacts.find((x) => x.id === r.contactId);
+          if (campaignId && c) persistSend(campaignId, c, { status: "sent" });
         }
       });
       setSendStatus(ns);
@@ -1027,8 +1189,11 @@ BODY:
     sendNow(ids);
   };
 
-  const setStatus = (id, st) =>
+  const setStatus = (id, st) => {
     setSendStatus((prev) => ({ ...prev, [id]: st }));
+    const c = contacts.find((x) => x.id === id);
+    if (campaignId && c) persistSend(campaignId, c, { status: st });
+  };
 
   const exportCsv = () => {
     const rows = scored
@@ -1160,6 +1325,8 @@ BODY:
               fontWeight: 600,
               padding: "7px 12px",
               borderRadius: 5,
+              whiteSpace: "nowrap",
+              flexShrink: 0,
               border: `1px solid ${gmail === "connected" ? "#3E7D5A" : "#3A4652"}`,
               background: gmail === "connected" ? "#1F3B2C" : "transparent",
               color: gmail === "connected" ? "#B7E4C7" : "#C4D0DA",
@@ -1259,6 +1426,37 @@ BODY:
               : busy === "uploadContacts"
               ? "컨택 DB에 업로드 중…"
               : `초안 생성 중… ${progress}%`)}
+        </div>
+      )}
+
+      {restoredNote && !err && !busy && (
+        <div
+          style={{
+            padding: "9px 24px",
+            background: "#EAF2FA",
+            color: "#2C5A85",
+            fontSize: 12,
+            fontFamily: "Inter, sans-serif",
+            borderBottom: `1px solid ${C.line}`,
+            display: "flex",
+            alignItems: "center",
+            gap: 10,
+          }}
+        >
+          <RefreshCw size={13} />
+          {restoredNote}
+          <button
+            onClick={() => setRestoredNote("")}
+            style={{
+              marginLeft: "auto",
+              background: "none",
+              border: "none",
+              cursor: "pointer",
+              color: "#2C5A85",
+            }}
+          >
+            <X size={13} />
+          </button>
         </div>
       )}
 
@@ -1754,11 +1952,19 @@ BODY:
 
               <div style={{ marginTop: 16 }}>
                 <Field
-                  label={`초안 개수 (상위 ${limit}명)`}
-                  value={String(limit)}
-                  onChange={(v) => setLimit(Math.max(1, Math.min(40, Number(v) || 1)))}
+                  label={`초안 개수 (상위 ${
+                    Number.isFinite(limitNum) && limitNum > 0 ? limitNum : "?"
+                  }명)`}
+                  value={limit}
+                  onChange={(v) => setLimit(v.replace(/[^0-9]/g, ""))}
                   mono
                 />
+                {limit !== "" &&
+                  (!Number.isFinite(limitNum) || limitNum <= 0) && (
+                    <div style={{ fontSize: 11, color: C.alert, marginTop: -8, marginBottom: 10 }}>
+                      1 이상의 숫자를 입력하세요.
+                    </div>
+                  )}
               </div>
 
               <Btn
@@ -1808,6 +2014,7 @@ BODY:
                           fontFamily: "Inter, sans-serif",
                           fontSize: 12,
                           fontWeight: 600,
+                          whiteSpace: "nowrap",
                           background: lang === L ? C.pine : "transparent",
                           color: lang === L ? "#fff" : C.mute,
                         }}
@@ -1816,9 +2023,15 @@ BODY:
                       </button>
                     ))}
                   </div>
-                  <Btn onClick={runDrafts} disabled={!scored.length || !!busy}>
+                  <Btn
+                    onClick={runDrafts}
+                    disabled={!scored.length || !!busy || !Number.isFinite(limitNum) || limitNum <= 0}
+                  >
                     {lang === "KO" ? "한국어로" : "영어로"} 상위{" "}
-                    {Math.min(limit, scored.length)}명 초안 생성
+                    {Number.isFinite(limitNum) && limitNum > 0
+                      ? Math.min(limitNum, scored.length)
+                      : "?"}
+                    명 초안 생성
                   </Btn>
                 </div>
               </div>
@@ -1833,8 +2046,8 @@ BODY:
                     alignItems: "center",
                     padding: "11px 20px",
                     borderBottom: `1px solid ${C.line}`,
-                    background: i < limit ? C.surface : "#FAFBFC",
-                    opacity: i < limit ? 1 : 0.55,
+                    background: i < limitNum ? C.surface : "#FAFBFC",
+                    opacity: i < limitNum ? 1 : 0.55,
                   }}
                 >
                   <div
@@ -1892,18 +2105,30 @@ BODY:
                 alignItems: "center",
                 gap: 10,
                 marginBottom: 16,
+                flexWrap: "wrap",
+                rowGap: 10,
               }}
             >
               <H sub="수정하면 다음 초안부터 Tammy의 문체를 따라갑니다. 발송은 직접 하세요.">
                 초안 {Object.keys(drafts).length}건
               </H>
-              <div style={{ marginLeft: "auto", display: "flex", gap: 8, alignItems: "center" }}>
+              <div
+                style={{
+                  marginLeft: "auto",
+                  display: "flex",
+                  gap: 8,
+                  alignItems: "center",
+                  flexWrap: "wrap",
+                  rowGap: 8,
+                }}
+              >
                 <div
                   style={{
                     display: "flex",
                     border: `1px solid ${C.line}`,
                     borderRadius: 4,
                     overflow: "hidden",
+                    flexShrink: 0,
                   }}
                 >
                   {["EN", "KO"].map((L) => (
@@ -1917,6 +2142,7 @@ BODY:
                         fontFamily: "Inter, sans-serif",
                         fontSize: 12,
                         fontWeight: 600,
+                        whiteSpace: "nowrap",
                         background: lang === L ? C.pine : "transparent",
                         color: lang === L ? "#fff" : C.mute,
                       }}
