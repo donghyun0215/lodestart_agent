@@ -52,6 +52,7 @@ create table if not exists sends (
 alter table sends add column if not exists contact_id     uuid references contacts(id) on delete cascade;
 alter table sends add column if not exists gmail_draft_id text;
 alter table sends add column if not exists updated_at     timestamptz default now();
+alter table sends add column if not exists thread_id      text;  -- Gmail thread id, used to detect replies
 
 -- one row per (campaign, contact) — lets us upsert instead of duplicating
 -- rows every time a draft is regenerated or a status changes.

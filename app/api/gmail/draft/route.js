@@ -76,13 +76,15 @@ export async function POST(req) {
       }
       const ok = res.ok;
       let draftId = null;
+      let threadId = null;
       if (ok) {
         try {
           const j = await res.json();
           draftId = j.id || null;
+          threadId = j.message?.threadId || null;
         } catch (_) {}
       }
-      results.push({ to: d.to, ok, draftId });
+      results.push({ to: d.to, ok, draftId, threadId });
     }
 
     const headers = new Headers({ "content-type": "application/json" });

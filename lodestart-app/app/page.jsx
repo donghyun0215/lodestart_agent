@@ -19,6 +19,7 @@ import {
   Search,
   Database,
   RefreshCw,
+  Pin,
 } from "lucide-react";
 
 /* ------------------------------------------------------------------ */
@@ -100,6 +101,7 @@ const K = {
   edits: "ld:edits",
   startups: "ld:startups",
   prefs: "ld:prefs", // last audience/lang selected — helps land back on the right view after refresh
+  draftStartup: "ld:draftStartup", // whatever's currently typed, saved continuously — not just on "저장" click
 };
 
 /* ------------------------------- storage ------------------------------- */
@@ -504,6 +506,9 @@ export default function App() {
   const [gmail, setGmail] = useState("unknown"); // unknown|connected|error
   const [sendStatus, setSendStatus] = useState({}); // id -> draft|sent|replied|no_interest
   const [gmailDraftIds, setGmailDraftIds] = useState({}); // contact id -> gmail draft id
+  const [threadIds, setThreadIds] = useState({}); // contact id -> gmail thread id (for reply detection)
+  const [syncing, setSyncing] = useState(false);
+  const [lastSync, setLastSync] = useState(null);
   const [pushMsg, setPushMsg] = useState("");
   const [usage, setUsage] = useState({ in: 0, out: 0, calls: 0 });
   const [campaignId, setCampaignId] = useState(null);
@@ -540,22 +545,29 @@ export default function App() {
   // Never blocks the UI — failures are logged but don't interrupt the flow.
   const persistSend = async (cid, contact, extra) => {
     if (!cid || !contact) return;
-    try {
-      await supabase.from("sends").upsert(
-        {
-          campaign_id: cid,
-          contact_id: contact.id,
-          email: contact.email,
-          org: contact.org,
-          person: contact.person,
-          fit: scores[contact.id]?.score ?? null,
-          updated_at: new Date().toISOString(),
-          ...extra,
-        },
-        { onConflict: "campaign_id,contact_id" }
+    const { error } = await supabase.from("sends").upsert(
+      {
+        campaign_id: cid,
+        contact_id: contact.id,
+        email: contact.email,
+        org: contact.org,
+        person: contact.person,
+        fit: scores[contact.id]?.score ?? null,
+        updated_at: new Date().toISOString(),
+        ...extra,
+      },
+      { onConflict: "campaign_id,contact_id" }
+    );
+    if (error) {
+      // Supabase doesn't throw on failure — it returns { error } — so this
+      // was silently swallowed before. Surface it so a save failure is
+      // actually visible instead of just vanishing.
+      console.error("persistSend failed", error);
+      setErr(
+        "⚠ 저장 실패: " +
+          error.message +
+          " — Supabase에서 supabase_schema.sql을 다시 실행했는지 확인하세요."
       );
-    } catch (e) {
-      console.error("persistSend failed", e);
     }
   };
 
@@ -603,22 +615,38 @@ export default function App() {
       setEdits(await loadKey(K.edits, []));
       const s = await loadKey(K.startups, []);
       setStartups(s);
-      if (s.length) setStartup(s[s.length - 1]);
+      // Whatever was last typed (even if "프로필 저장" was never clicked)
+      // takes priority over the curated saved-profiles list — this is what
+      // makes the campaign-restore effect below able to find its match
+      // after a refresh.
+      const draft = await loadKey(K.draftStartup, null);
+      if (draft && draft.name) setStartup(draft);
+      else if (s.length) setStartup(s[s.length - 1]);
       const p = await loadKey(K.prefs, null);
       if (p) {
         if (p.audience) setAudience(p.audience);
         if (p.lang) setLang(p.lang);
+        if (p.tab) setTab(p.tab);
       }
       setReady(true);
     })();
   }, []);
 
-  // Remember the last audience/lang picked, so a refresh lands back on the
-  // same view (and so the campaign-restore effect below knows where to look).
+  // Autosave every keystroke in the startup profile — not just on
+  // "프로필 저장" — so typing a name and immediately matching/drafting
+  // still survives a refresh.
   useEffect(() => {
     if (!ready) return;
-    saveKey(K.prefs, { audience, lang });
-  }, [ready, audience, lang]);
+    saveKey(K.draftStartup, startup);
+  }, [ready, startup]);
+
+  // Remember the last tab/audience/lang picked, so a refresh lands back on
+  // the same screen instead of always bouncing to "1 · 컨택"
+  // (and so the campaign-restore effect below knows where to look).
+  useEffect(() => {
+    if (!ready) return;
+    saveKey(K.prefs, { audience, lang, tab });
+  }, [ready, audience, lang, tab]);
 
   // Restore a previous campaign's matches/drafts/statuses from the DB when
   // landing on a startup+audience that already has saved work. Without
@@ -629,38 +657,43 @@ export default function App() {
     let cancelled = false;
     (async () => {
       try {
-        const { data: camp } = await supabase
+        const { data: camp, error: campErr } = await supabase
           .from("campaigns")
           .select("id")
           .eq("startup", startup.name)
           .eq("audience", audience)
           .order("created_at", { ascending: false })
           .limit(1);
+        if (campErr) throw campErr;
         if (cancelled || !camp || !camp.length) return;
         const cid = camp[0].id;
         setCampaignId(cid);
-        const { data: rows } = await supabase
+        const { data: rows, error: rowsErr } = await supabase
           .from("sends")
           .select("*")
           .eq("campaign_id", cid);
+        if (rowsErr) throw rowsErr;
         if (cancelled || !rows || !rows.length) return;
-        const sc = {}, dr = {}, st = {}, gd = {};
+        const sc = {}, dr = {}, st = {}, gd = {}, td = {};
         rows.forEach((r) => {
           if (r.fit !== null && r.fit !== undefined) sc[r.contact_id] = { score: r.fit, reason: "" };
           if (r.subject || r.body) dr[r.contact_id] = { subject: r.subject || "", body: r.body || "", edited: false };
           if (r.status) st[r.contact_id] = r.status;
           if (r.gmail_draft_id) gd[r.contact_id] = r.gmail_draft_id;
+          if (r.thread_id) td[r.contact_id] = r.thread_id;
         });
         // Only fill in if we don't already have live, unsaved work in memory.
         setScores((p) => (Object.keys(p).length ? p : sc));
         setDrafts((p) => (Object.keys(p).length ? p : dr));
         setSendStatus((p) => (Object.keys(p).length ? p : st));
         setGmailDraftIds((p) => (Object.keys(p).length ? p : gd));
+        setThreadIds((p) => (Object.keys(p).length ? p : td));
         if (Object.keys(dr).length) {
           setRestoredNote(`이전 캠페인을 복원했습니다 — 초안 ${Object.keys(dr).length}건.`);
         }
       } catch (e) {
         console.error("campaign restore failed", e);
+        setErr("⚠ 복원 실패: " + e.message);
       }
     })();
     return () => {
@@ -1107,19 +1140,27 @@ BODY:
       const ok = (data.results || []).filter((r) => r.ok).length;
       const ns = { ...sendStatus };
       const ids = { ...gmailDraftIds };
+      const tids = { ...threadIds };
       const cid = await getOrCreateCampaignId();
       (data.results || []).forEach((r, i) => {
         if (r.ok) {
           ns[rows[i].id] = ns[rows[i].id] || "draft_in_gmail";
           if (r.draftId) {
             ids[rows[i].id] = r.draftId;
+            if (r.threadId) tids[rows[i].id] = r.threadId;
             const c = contacts.find((x) => x.id === rows[i].id);
-            if (cid && c) persistSend(cid, c, { gmail_draft_id: r.draftId, status: "draft" });
+            if (cid && c)
+              persistSend(cid, c, {
+                gmail_draft_id: r.draftId,
+                thread_id: r.threadId || null,
+                status: "draft",
+              });
           }
         }
       });
       setSendStatus(ns);
       setGmailDraftIds(ids);
+      setThreadIds(tids);
       setPushMsg(`${ok}건을 Gmail 초안함에 넣었습니다. 검토 후 대시보드에서 발송하거나 Gmail에서 직접 보내세요.`);
     } catch (e) {
       setPushMsg("실패: " + e.message);
@@ -1189,10 +1230,78 @@ BODY:
     sendNow(ids);
   };
 
+  // Ask Gmail whether any tracked drafts have been sent (from the app OR
+  // manually inside Gmail) and whether any threads got a reply. Read-only.
+  const syncGmail = async () => {
+    const items = Object.keys(gmailDraftIds)
+      .filter((id) => sendStatus[id] !== "replied") // already know the outcome, skip
+      .map((id) => ({
+        contactId: id,
+        gmailDraftId: gmailDraftIds[id],
+        threadId: threadIds[id] || null,
+      }));
+    if (!items.length) return;
+    setSyncing(true);
+    try {
+      const res = await fetch("/api/gmail/sync", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ items }),
+      });
+      if (res.status === 401) {
+        setGmail("unknown");
+        setPushMsg("Gmail 연결이 만료됐습니다. 다시 연결해주세요.");
+        setSyncing(false);
+        return;
+      }
+      const data = await res.json();
+      const ns = { ...sendStatus };
+      let changed = 0;
+      (data.results || []).forEach((r) => {
+        const c = contacts.find((x) => x.id === r.contactId);
+        let newStatus = null;
+        if (r.replied) newStatus = "replied";
+        else if (r.sent && ns[r.contactId] !== "no_interest") newStatus = "sent";
+        if (newStatus && ns[r.contactId] !== newStatus) {
+          ns[r.contactId] = newStatus;
+          changed += 1;
+          if (campaignId && c) persistSend(campaignId, c, { status: newStatus });
+        }
+      });
+      if (changed) setSendStatus(ns);
+      setLastSync(new Date());
+    } catch (e) {
+      console.error("syncGmail failed", e);
+    }
+    setSyncing(false);
+  };
+
+  // Auto-poll every 45s while sitting on the dashboard tab, so replies show
+  // up without having to click anything — but only if Gmail is connected
+  // and there's something worth checking.
+  useEffect(() => {
+    if (tab !== "dash" || gmail !== "connected") return;
+    if (!Object.keys(gmailDraftIds).length) return;
+    syncGmail();
+    const t = setInterval(syncGmail, 45000);
+    return () => clearInterval(t);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [tab, gmail, campaignId]);
+
   const setStatus = (id, st) => {
     setSendStatus((prev) => ({ ...prev, [id]: st }));
     const c = contacts.find((x) => x.id === id);
     if (campaignId && c) persistSend(campaignId, c, { status: st });
+  };
+
+  // Manually force a contact to the top of the ranking — bypasses the AI
+  // score entirely. Useful for testing the pipeline end-to-end with a
+  // known contact, or for "I know this one matters, skip the scoring".
+  const pinContact = (id) => {
+    setScores((prev) => ({
+      ...prev,
+      [id]: { score: 100, reason: "수동 고정 — 사용자가 직접 최상위로 지정" },
+    }));
   };
 
   const exportCsv = () => {
@@ -2085,6 +2194,29 @@ BODY:
                   >
                     {c.email}
                   </div>
+                  <button
+                    onClick={() => pinContact(c.id)}
+                    title="이 컨택을 최상위로 고정 (점수 100)"
+                    style={{
+                      display: "flex",
+                      alignItems: "center",
+                      justifyContent: "center",
+                      width: 26,
+                      height: 26,
+                      flexShrink: 0,
+                      border: `1px solid ${
+                        scores[c.id].reason?.startsWith("수동 고정") ? C.pine : C.line
+                      }`,
+                      borderRadius: 5,
+                      background: scores[c.id].reason?.startsWith("수동 고정")
+                        ? C.pineSoft
+                        : "transparent",
+                      color: scores[c.id].reason?.startsWith("수동 고정") ? C.pine : C.mute,
+                      cursor: "pointer",
+                    }}
+                  >
+                    <Pin size={12} strokeWidth={2.3} />
+                  </button>
                 </div>
               ))}
               {!scored.length && (
@@ -2415,9 +2547,52 @@ BODY:
 
               return (
                 <div>
-                  <H sub={`${startup.name || "—"} · ${AUDIENCES[audience].label}`}>
-                    성과 대시보드
-                  </H>
+                  <div
+                    style={{
+                      display: "flex",
+                      alignItems: "flex-start",
+                      justifyContent: "space-between",
+                      gap: 12,
+                      flexWrap: "wrap",
+                    }}
+                  >
+                    <H sub={`${startup.name || "—"} · ${AUDIENCES[audience].label}`}>
+                      성과 대시보드
+                    </H>
+                    <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                      {lastSync && (
+                        <span style={{ fontSize: 11, color: C.mute }}>
+                          마지막 확인: {lastSync.toLocaleTimeString("ko-KR")}
+                        </span>
+                      )}
+                      <Btn
+                        small
+                        kind="ghost"
+                        icon={syncing ? Loader2 : RefreshCw}
+                        onClick={syncGmail}
+                        disabled={syncing || !Object.keys(gmailDraftIds).length}
+                      >
+                        {syncing ? "확인 중…" : "Gmail 동기화"}
+                      </Btn>
+                    </div>
+                  </div>
+
+                  {gmail !== "connected" && Object.keys(gmailDraftIds).length > 0 && (
+                    <div
+                      style={{
+                        marginBottom: 14,
+                        padding: "9px 12px",
+                        borderRadius: 5,
+                        background: "#FBF3D9",
+                        border: "1px solid #E0C15C",
+                        color: "#7A611F",
+                        fontSize: 11.5,
+                      }}
+                    >
+                      회신·발송 자동 감지를 쓰려면 Gmail을 다시 연결해주세요 (읽기 권한이
+                      추가돼서 재연결이 한 번 필요합니다).
+                    </div>
+                  )}
                   <div
                     style={{
                       display: "flex",
@@ -2488,8 +2663,9 @@ BODY:
                           marginTop: 3,
                         }}
                       >
-                        앱에서 "지금 발송"으로 보내면 자동으로 기록됩니다. Gmail 앱에서 직접
-                        보냈거나 회신을 받았다면 아래 버튼으로 직접 표시해주세요.
+                        Gmail 동기화가 켜져 있으면(대시보드에 있는 동안 45초마다 자동 확인)
+                        Gmail에서 직접 보내거나 회신이 와도 자동으로 반영됩니다. 안 되는
+                        경우에만 아래 버튼으로 직접 표시해주세요.
                       </div>
                     </div>
                     <div style={{ maxHeight: 420, overflowY: "auto" }}>
