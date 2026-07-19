@@ -1080,7 +1080,7 @@ BODY:
               persistSend(cid, c, {
                 subject: d.subject,
                 body: d.body,
-                status: sendStatus[c.id]?.replace("draft_in_gmail", "draft") || "draft",
+                status: sendStatus[c.id] || "draft",
               });
             })
           )
@@ -1144,7 +1144,7 @@ BODY:
       const cid = await getOrCreateCampaignId();
       (data.results || []).forEach((r, i) => {
         if (r.ok) {
-          ns[rows[i].id] = ns[rows[i].id] || "draft_in_gmail";
+          ns[rows[i].id] = ns[rows[i].id] || "draft";
           if (r.draftId) {
             ids[rows[i].id] = r.draftId;
             if (r.threadId) tids[rows[i].id] = r.threadId;
@@ -1242,6 +1242,7 @@ BODY:
         threadId: threadIds[id] || null,
       }));
     if (!items.length) return;
+    console.log("[Gmail 동기화] 확인 요청:", items);
     setSyncing(true);
     try {
       const res = await fetch("/api/gmail/sync", {
@@ -1256,6 +1257,7 @@ BODY:
         return;
       }
       const data = await res.json();
+      console.log("[Gmail 동기화] 서버 응답:", data.results);
       const ns = { ...sendStatus };
       let changed = 0;
       const cid = campaignId || (await getOrCreateCampaignId());
@@ -2511,8 +2513,18 @@ BODY:
               const withDrafts = scored.filter((c) => drafts[c.id]);
               const st = (id) => sendStatus[id] || "draft";
               const count = (v) => withDrafts.filter((c) => st(c.id) === v).length;
+              // "Gmail 초안함" = we have a real Gmail draft id for this contact
+              // AND it hasn't since been sent/replied (once sent, the draft
+              // object is gone from Gmail even if we haven't synced yet).
+              // This used to check sendStatus === "draft_in_gmail", but that
+              // string was never actually written to the database — every
+              // save wrote plain "draft" — so the count reset to 0 on every
+              // refresh regardless of what was really in Gmail.
               const inGmail = withDrafts.filter(
-                (c) => st(c.id) === "draft_in_gmail"
+                (c) =>
+                  gmailDraftIds[c.id] &&
+                  st(c.id) !== "sent" &&
+                  st(c.id) !== "replied"
               ).length;
               const sent = count("sent");
               const replied = count("replied");
@@ -2722,11 +2734,7 @@ BODY:
                             ["replied", "회신"],
                             ["no_interest", "관심없음"],
                           ].map(([v, label]) => {
-                            const on =
-                              (sendStatus[c.id] || "draft").replace(
-                                "draft_in_gmail",
-                                "draft"
-                              ) === v;
+                            const on = (sendStatus[c.id] || "draft") === v;
                             return (
                               <button
                                 key={v}
