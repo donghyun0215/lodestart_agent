@@ -31,9 +31,9 @@ async function draftExists(token, draftId) {
     `https://gmail.googleapis.com/gmail/v1/users/me/drafts/${draftId}`,
     { headers: { authorization: `Bearer ${token}` } }
   );
-  if (res.status === 404) return { exists: false, authFail: false };
-  if (res.status === 401) return { exists: null, authFail: true };
-  return { exists: res.ok, authFail: false };
+  if (res.status === 404) return { exists: false, authFail: false, status: 404 };
+  if (res.status === 401) return { exists: null, authFail: true, status: 401 };
+  return { exists: res.ok, authFail: false, status: res.status };
 }
 
 async function threadHasReply(token, threadId) {
@@ -41,8 +41,8 @@ async function threadHasReply(token, threadId) {
     `https://gmail.googleapis.com/gmail/v1/users/me/threads/${threadId}?format=minimal`,
     { headers: { authorization: `Bearer ${token}` } }
   );
-  if (res.status === 401) return { replied: null, authFail: true };
-  if (!res.ok) return { replied: false, authFail: false };
+  if (res.status === 401) return { replied: null, authFail: true, count: "auth-fail" };
+  if (!res.ok) return { replied: false, authFail: false, count: `http-${res.status}` };
   const j = await res.json();
   // A reply always appends a genuinely new message to the thread, so the
   // message COUNT is the reliable signal — not labels. (Checking for a
@@ -50,7 +50,7 @@ async function threadHasReply(token, threadId) {
   // message also lacks "SENT", which made every un-sent draft look like
   // it already had a reply.)
   const count = (j.messages || []).length;
-  return { replied: count > 1, authFail: false };
+  return { replied: count > 1, authFail: false, count };
 }
 
 export async function POST(req) {
@@ -78,13 +78,17 @@ export async function POST(req) {
     for (const item of items || []) {
       let sent = null;
       let replied = null;
+      const debug = { draftId: item.gmailDraftId, threadId: item.threadId };
 
       if (item.gmailDraftId) {
         let d = await draftExists(accessToken, item.gmailDraftId);
         if (d.authFail && (await refreshIfNeeded())) {
           d = await draftExists(accessToken, item.gmailDraftId);
         }
+        debug.draftStatus = d.status; // 404 = sent/deleted, 200 = still a draft
         if (d.exists !== null) sent = !d.exists; // draft gone -> it was sent
+      } else {
+        debug.draftStatus = "no-draft-id-stored";
       }
 
       if (item.threadId) {
@@ -92,10 +96,13 @@ export async function POST(req) {
         if (t.authFail && (await refreshIfNeeded())) {
           t = await threadHasReply(accessToken, item.threadId);
         }
+        debug.messageCount = t.count;
         if (t.replied !== null) replied = t.replied;
+      } else {
+        debug.messageCount = "no-thread-id-stored";
       }
 
-      results.push({ contactId: item.contactId, sent, replied });
+      results.push({ contactId: item.contactId, sent, replied, debug });
     }
 
     const headers = new Headers({ "content-type": "application/json" });
