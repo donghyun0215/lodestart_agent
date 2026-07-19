@@ -154,6 +154,25 @@ function fileToBase64(file) {
   });
 }
 
+
+// Drafts come back as plain text with SUBJECT:/BODY: markers.
+// Avoids all JSON escaping problems with newlines and Korean quotes.
+function parseDraft(text) {
+  const t = (text || "").replace(/```/g, "").trim();
+  const sm = t.match(/SUBJECT:\s*(.+)/i);
+  const bi = t.search(/BODY:\s*/i);
+  let subject = sm ? sm[1].trim() : "";
+  let body = bi >= 0 ? t.slice(bi).replace(/^BODY:\s*/i, "") : "";
+  if (!body) {
+    // model ignored the format - fall back to "first line = subject, rest = body"
+    const lines = t.split("\n");
+    subject = subject || lines[0].replace(/^subject\s*:\s*/i, "").trim();
+    body = lines.slice(1).join("\n").trim();
+  }
+  if (!subject) subject = "(제목 없음)";
+  return { subject: subject.trim(), body: body.trim() };
+}
+
 function parseJSON(text) {
   const clean = text.replace(/```json|```/g, "").trim();
   const s = clean.indexOf("[") >= 0 ? clean.indexOf("[") : clean.indexOf("{");
@@ -632,12 +651,13 @@ ${tone.rules}
 Never use these words: ${tone.banned}
 ${fewShot()}
 
-Return ONLY JSON, and inside the strings use no unescaped double quotes:
-{"subject":"...","body":"..."}`;
+OUTPUT FORMAT — follow exactly, no JSON, no markdown, no commentary:
+SUBJECT: <the subject line on one line>
+BODY:
+<the full email body, as many lines as needed>`;
 
     const out = await claude(prompt, 1400);
-    const j = parseJSON(out);
-    return { subject: j.subject, body: j.body, edited: false };
+    return { ...parseDraft(out), edited: false };
   };
 
   const runDrafts = async () => {
