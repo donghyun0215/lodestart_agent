@@ -36,7 +36,7 @@ function buildRaw({ to, subject, body }) {
 }
 
 async function createDraft(accessToken, msg) {
-  return fetch("https://gmail.googleapis.com/gmail/v1/users/me/drafts", {
+  const res = await fetch("https://gmail.googleapis.com/gmail/v1/users/me/drafts", {
     method: "POST",
     headers: {
       authorization: `Bearer ${accessToken}`,
@@ -44,6 +44,7 @@ async function createDraft(accessToken, msg) {
     },
     body: JSON.stringify({ message: { raw: buildRaw(msg) } }),
   });
+  return res;
 }
 
 export async function POST(req) {
@@ -74,7 +75,14 @@ export async function POST(req) {
         }
       }
       const ok = res.ok;
-      results.push({ to: d.to, ok });
+      let draftId = null;
+      if (ok) {
+        try {
+          const j = await res.json();
+          draftId = j.id || null;
+        } catch (_) {}
+      }
+      results.push({ to: d.to, ok, draftId });
     }
 
     const headers = new Headers({ "content-type": "application/json" });

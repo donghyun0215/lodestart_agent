@@ -37,16 +37,18 @@ cp .env.example .env.local
 2. **New project** → 이름 `lodestart` → DB 비밀번호 아무거나(적어둬) → 리전 Singapore → Create
 3. 프로젝트 뜨면 (1~2분) → 좌측 **SQL Editor** → New query
 4. 이 폴더의 `supabase_schema.sql` 내용 전체 복붙 → **Run**
-   → "Success" 뜨면 테이블 2개 생성됨
+   → "Success" 뜨면 테이블 3개(contacts, campaigns, sends) 생성됨
 5. 좌측 **Settings (톱니) → API**
    - **Project URL** 복사 → `.env.local` 의 `NEXT_PUBLIC_SUPABASE_URL=`
    - **anon public** 키 복사 → `NEXT_PUBLIC_SUPABASE_ANON_KEY=`
 
-**[확인]** Table Editor 에 `campaigns`, `sends` 두 테이블 보이면 OK.
+**[확인]** Table Editor 에 `contacts`, `campaigns`, `sends` 세 테이블 보이면 OK.
 
-> 참고: 이번 버전은 발송 상태를 화면(브라우저)에 저장해. Supabase는 다음 단계에서
-> 캠페인 영구저장을 붙일 때 쓰는 자리를 미리 만들어둔 거야. 지금 데모엔 URL/키만
-> 넣어두면 되고 없어도 앱은 돌아가.
+> 컨택 리스트는 이제 매번 파일을 올릴 필요 없이 DB에 저장돼.
+> 배포 다 끝난 뒤, 앱의 "1 · 컨택" 탭에서 `contacts_master.csv` 를
+> 딱 한 번 업로드하면 그 뒤로는 누가 접속하든 DB에서 바로 불러와.
+> 나중에 새 리스트를 추가할 때도 같은 탭에서 CSV를 다시 올리면
+> 이메일 기준으로 자동 병합(업데이트/추가, 중복 없음)돼.
 
 ---
 
@@ -138,10 +140,26 @@ Gmail 초안함에 실제로 메일이 생기면 **끝. 완성.**
 ## 사용 흐름 (완성 후)
 
 ```
-컨택 CSV 업로드 → 스타트업(또는 IR PDF) → 매칭 → 초안 생성(한/영)
-→ "Gmail 초안함에 넣기" → Gmail 열어서 검토하고 Send
-→ 대시보드에서 보냄/회신 상태 클릭 기록 → 회신율 확인
+(처음 한 번) 컨택 탭에서 contacts_master.csv 업로드 → DB에 저장됨
+→ 다음부터는 자동으로 DB에서 불러옴, 새 리스트는 같은 방식으로 추가
+
+스타트업(또는 IR PDF) → 매칭 → 초안 생성(한/영)
+→ "Gmail 초안함에 넣기" → Gmail 열어서 검토, 또는 앱에서 "지금 발송"
+→ 대시보드에서 보냄/회신 상태 확인 → 회신율 확인
 ```
+
+## ⚠️ "지금 발송" 버튼에 대해
+
+이번 업데이트로 앱 안에서 바로 발송하는 버튼이 생겼어. **기본은 여전히 Gmail 초안함에
+넣기**이고, 실제 발송은 확인 절차를 거치게 만들어뒀어(개별은 confirm, 전체는 "발송"
+직접 타이핑). 그래도 이건 클릭 한 번으로 실제 메일이 나가는 기능이니, 처음 몇 번은
+Gmail에서 직접 검토하고 보내는 걸 권장해. 신뢰가 쌓이면 "지금 발송"을 써도 좋아.
+
+## 크레딧 표시에 대해
+
+헤더의 "≈ $X 사용" 은 **추정치**야. Anthropic API 키로는 실제 잔여 크레딧을 조회할
+방법이 없어서, 이번 세션에 실제로 쓴 토큰 수를 세서 계산한 값이야. 정확한 잔액은
+console.anthropic.com → Billing 에서 확인해야 해.
 
 ## 안 되면 자주 나오는 것들
 

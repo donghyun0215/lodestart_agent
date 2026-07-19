@@ -1,6 +1,25 @@
 "use client";
 import React, { useState, useEffect, useMemo, useCallback } from "react";
 import Papa from "papaparse";
+import { supabase } from "../lib/supabase";
+import {
+  Users,
+  Building2,
+  Landmark,
+  Sparkles,
+  LayoutDashboard,
+  SlidersHorizontal,
+  Mail,
+  Send,
+  FileUp,
+  Check,
+  X,
+  Loader2,
+  Compass,
+  Search,
+  Database,
+  RefreshCw,
+} from "lucide-react";
 
 /* ------------------------------------------------------------------ */
 /*  Lodestart Outreach Desk — v0 prototype                            */
@@ -9,6 +28,8 @@ import Papa from "papaparse";
 
 const FONTS = `
 @import url('https://fonts.googleapis.com/css2?family=Archivo:wght@500;600;700&family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap');
+@keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
+.spin { animation: spin 1s linear infinite; }
 `;
 
 const C = {
@@ -93,6 +114,15 @@ async function saveKey(key, value) {
 }
 
 /* --------------------------------- api --------------------------------- */
+// Module-level hook the component registers so these standalone functions
+// can report token usage back into React state. Not exact billing — the
+// real balance isn't readable from a normal API key — just a running
+// estimate from each response's own usage numbers.
+let onUsage = null;
+function reportUsage(u) {
+  if (onUsage && u) onUsage(u);
+}
+
 async function claude(prompt, maxTokens = 1000, tries = 0) {
   const res = await fetch("/api/claude", {
     method: "POST",
@@ -111,6 +141,7 @@ async function claude(prompt, maxTokens = 1000, tries = 0) {
   }
   if (!res.ok) throw new Error(`API ${res.status}`);
   const data = await res.json();
+  reportUsage(data.usage);
   return data.content
     .filter((b) => b.type === "text")
     .map((b) => b.text)
@@ -138,6 +169,7 @@ async function claudeWithDoc(source, prompt, maxTokens = 1500, tries = 0) {
   }
   if (!res.ok) throw new Error(`API ${res.status}`);
   const data = await res.json();
+  reportUsage(data.usage);
   return data.content
     .filter((b) => b.type === "text")
     .map((b) => b.text)
@@ -152,6 +184,25 @@ function fileToBase64(file) {
     r.onerror = () => reject(new Error("파일을 읽지 못했습니다."));
     r.readAsDataURL(file);
   });
+}
+
+
+// Drafts come back as plain text with SUBJECT:/BODY: markers.
+// Avoids all JSON escaping problems with newlines and Korean quotes.
+function parseDraft(text) {
+  const t = (text || "").replace(/```/g, "").trim();
+  const sm = t.match(/SUBJECT:\s*(.+)/i);
+  const bi = t.search(/BODY:\s*/i);
+  let subject = sm ? sm[1].trim() : "";
+  let body = bi >= 0 ? t.slice(bi).replace(/^BODY:\s*/i, "") : "";
+  if (!body) {
+    // model ignored the format - fall back to "first line = subject, rest = body"
+    const lines = t.split("\n");
+    subject = subject || lines[0].replace(/^subject\s*:\s*/i, "").trim();
+    body = lines.slice(1).join("\n").trim();
+  }
+  if (!subject) subject = "(제목 없음)";
+  return { subject: subject.trim(), body: body.trim() };
 }
 
 function parseJSON(text) {
@@ -189,29 +240,58 @@ function parseJSON(text) {
 }
 
 /* --------------------------------- ui ---------------------------------- */
-const Btn = ({ children, onClick, kind = "primary", disabled, small }) => {
+const Btn = ({ children, onClick, kind = "primary", disabled, small, icon: Icon }) => {
+  const [hover, setHover] = useState(false);
   const base = {
-    primary: { background: C.pine, color: "#fff", border: `1px solid ${C.pine}` },
-    ghost: { background: "transparent", color: C.ink, border: `1px solid ${C.line}` },
-    quiet: { background: "transparent", color: C.mute, border: "1px solid transparent" },
+    primary: {
+      background: hover && !disabled ? "#274F44" : C.pine,
+      color: "#fff",
+      border: `1px solid ${C.pine}`,
+      boxShadow: hover && !disabled ? "0 3px 10px rgba(47,93,80,0.28)" : "0 1px 2px rgba(47,93,80,0.15)",
+    },
+    ghost: {
+      background: hover && !disabled ? "#F2F4F6" : "transparent",
+      color: C.ink,
+      border: `1px solid ${C.line}`,
+      boxShadow: "none",
+    },
+    quiet: {
+      background: hover && !disabled ? "#F2F4F6" : "transparent",
+      color: C.mute,
+      border: "1px solid transparent",
+      boxShadow: "none",
+    },
+    danger: {
+      background: hover && !disabled ? "#7A2828" : C.alert,
+      color: "#fff",
+      border: `1px solid ${C.alert}`,
+      boxShadow: hover && !disabled ? "0 3px 10px rgba(142,47,47,0.28)" : "none",
+    },
   }[kind];
   return (
     <button
       onClick={onClick}
       disabled={disabled}
+      onMouseEnter={() => setHover(true)}
+      onMouseLeave={() => setHover(false)}
       style={{
         ...base,
         opacity: disabled ? 0.4 : 1,
         cursor: disabled ? "not-allowed" : "pointer",
         padding: small ? "5px 10px" : "9px 16px",
-        borderRadius: 4,
+        borderRadius: 5,
+        display: "inline-flex",
+        alignItems: "center",
+        gap: 6,
         fontFamily: "Inter, sans-serif",
         fontSize: small ? 12 : 13,
         fontWeight: 600,
         letterSpacing: "0.01em",
-        transition: "opacity .15s",
+        transition: "all .15s",
+        transform: hover && !disabled ? "translateY(-1px)" : "none",
       }}
     >
+      {Icon && <Icon size={small ? 12 : 14} strokeWidth={2.3} />}
       {children}
     </button>
   );
@@ -265,73 +345,111 @@ const inputStyle = (mono) => ({
   resize: "vertical",
 });
 
-const Card = ({ children, pad = 20, style }) => (
-  <div
-    style={{
-      background: C.surface,
-      border: `1px solid ${C.line}`,
-      borderRadius: 6,
-      padding: pad,
-      ...style,
-    }}
-  >
-    {children}
-  </div>
-);
-
-const H = ({ children, sub }) => (
-  <div style={{ marginBottom: 16 }}>
+const Card = ({ children, pad = 20, style, hoverable }) => {
+  const [hover, setHover] = useState(false);
+  return (
     <div
+      onMouseEnter={() => hoverable && setHover(true)}
+      onMouseLeave={() => hoverable && setHover(false)}
       style={{
-        fontFamily: "Archivo, sans-serif",
-        fontWeight: 700,
-        fontSize: 16,
-        color: C.ink,
-        letterSpacing: "-0.01em",
+        background: C.surface,
+        border: `1px solid ${hover ? "#C3CCD4" : C.line}`,
+        borderRadius: 8,
+        padding: pad,
+        boxShadow: hover
+          ? "0 6px 16px rgba(22,32,44,0.08)"
+          : "0 1px 3px rgba(22,32,44,0.04)",
+        transition: "box-shadow .18s, border-color .18s, transform .18s",
+        transform: hover ? "translateY(-1px)" : "none",
+        ...style,
       }}
     >
       {children}
     </div>
-    {sub && (
-      <div style={{ fontFamily: "Inter", fontSize: 12, color: C.mute, marginTop: 3 }}>
-        {sub}
+  );
+};
+
+const H = ({ children, sub, icon: Icon }) => (
+  <div style={{ marginBottom: 16, display: "flex", gap: 10, alignItems: "flex-start" }}>
+    <div
+      style={{
+        width: 3,
+        height: Icon ? 32 : 22,
+        borderRadius: 2,
+        background: `linear-gradient(180deg, ${C.pine}, #7CAE9B)`,
+        marginTop: 2,
+        flexShrink: 0,
+      }}
+    />
+    <div>
+      <div
+        style={{
+          fontFamily: "Archivo, sans-serif",
+          fontWeight: 700,
+          fontSize: 16,
+          color: C.ink,
+          letterSpacing: "-0.01em",
+          display: "flex",
+          alignItems: "center",
+          gap: 7,
+        }}
+      >
+        {Icon && <Icon size={16} color={C.pine} strokeWidth={2.3} />}
+        {children}
       </div>
-    )}
+      {sub && (
+        <div style={{ fontFamily: "Inter", fontSize: 12, color: C.mute, marginTop: 3 }}>
+          {sub}
+        </div>
+      )}
+    </div>
   </div>
 );
 
-const ScoreBar = ({ score }) => (
-  <div style={{ display: "flex", alignItems: "center", gap: 7 }}>
-    <div
-      style={{
-        width: 44,
-        height: 4,
-        background: C.line,
-        borderRadius: 2,
-        overflow: "hidden",
-      }}
-    >
+const ScoreBar = ({ score }) => {
+  const tone = score >= 70 ? C.pine : score >= 45 ? C.brass : "#9AA6B1";
+  return (
+    <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
       <div
         style={{
-          width: `${score}%`,
-          height: "100%",
-          background: score >= 70 ? C.pine : score >= 45 ? C.brass : C.line,
+          width: 48,
+          height: 5,
+          background: "#E7EBEE",
+          borderRadius: 3,
+          overflow: "hidden",
+          boxShadow: "inset 0 1px 1px rgba(22,32,44,0.06)",
         }}
-      />
+      >
+        <div
+          style={{
+            width: `${score}%`,
+            height: "100%",
+            borderRadius: 3,
+            background:
+              score >= 70
+                ? `linear-gradient(90deg, #2F5D50, #4A8A73)`
+                : score >= 45
+                ? `linear-gradient(90deg, #7A611F, #B08F35)`
+                : "#B7C1CA",
+            transition: "width .3s ease",
+          }}
+        />
+      </div>
+      <span
+        style={{
+          fontFamily: "'JetBrains Mono', monospace",
+          fontSize: 11,
+          fontWeight: 700,
+          color: tone,
+          minWidth: 22,
+          textAlign: "right",
+        }}
+      >
+        {score}
+      </span>
     </div>
-    <span
-      style={{
-        fontFamily: "'JetBrains Mono', monospace",
-        fontSize: 11,
-        fontWeight: 500,
-        color: score >= 70 ? C.pine : score >= 45 ? C.brass : C.mute,
-        width: 20,
-      }}
-    >
-      {score}
-    </span>
-  </div>
-);
+  );
+};
 
 /* ================================= app ================================= */
 export default function App() {
@@ -364,7 +482,25 @@ export default function App() {
   const [openId, setOpenId] = useState(null);
   const [gmail, setGmail] = useState("unknown"); // unknown|connected|error
   const [sendStatus, setSendStatus] = useState({}); // id -> draft|sent|replied|no_interest
+  const [gmailDraftIds, setGmailDraftIds] = useState({}); // contact id -> gmail draft id
   const [pushMsg, setPushMsg] = useState("");
+  const [usage, setUsage] = useState({ in: 0, out: 0, calls: 0 });
+
+  // Register the usage hook so claude()/claudeWithDoc() can report token counts.
+  useEffect(() => {
+    onUsage = (u) =>
+      setUsage((p) => ({
+        in: p.in + (u.input_tokens || 0),
+        out: p.out + (u.output_tokens || 0),
+        calls: p.calls + 1,
+      }));
+    return () => {
+      onUsage = null;
+    };
+  }, []);
+  // Sonnet pricing approx $3/MTok in, $15/MTok out — this is an ESTIMATE,
+  // not a real balance read (the API key can't report remaining credit).
+  const estCost = (usage.in / 1e6) * 3 + (usage.out / 1e6) * 15;
 
   // detect ?gmail=connected coming back from OAuth
   useEffect(() => {
@@ -387,32 +523,104 @@ export default function App() {
   }, []);
 
   /* ---------------------------- csv ingest ---------------------------- */
+  const [contactQuery, setContactQuery] = useState("");
+  const [contactTypeFilter, setContactTypeFilter] = useState("ALL");
+  const [dbNote, setDbNote] = useState("");
+
+  // Pull every row from the `contacts` table (paginated — Supabase caps at 1000/req).
+  const loadContacts = async () => {
+    setBusy("loadContacts");
+    setDbNote("");
+    try {
+      let all = [];
+      let from = 0;
+      const page = 1000;
+      // eslint-disable-next-line no-constant-condition
+      while (true) {
+        const { data, error } = await supabase
+          .from("contacts")
+          .select("*")
+          .range(from, from + page - 1);
+        if (error) throw error;
+        all = all.concat(data || []);
+        if (!data || data.length < page) break;
+        from += page;
+      }
+      setContacts(
+        all
+          .map((r) => ({
+            id: r.id,
+            email: (r.email || "").trim(),
+            org: (r.org || "").trim(),
+            person: (r.person || "").trim(),
+            title: (r.title || "").trim(),
+            country: (r.country || "").trim(),
+            type: (r.type || "").trim(),
+            notes: (r.notes || "").trim(),
+            sendable: (r.sendable || "YES").trim(),
+          }))
+          .filter((c) => c.email && c.sendable === "YES")
+      );
+    } catch (e) {
+      setDbNote(
+        "DB에서 컨택을 불러오지 못했습니다: " +
+          e.message +
+          " — Supabase 설정(.env.local, supabase_schema.sql 실행 여부)을 확인하세요."
+      );
+    }
+    setBusy("");
+  };
+
+  // Load contacts from the DB once on mount.
+  useEffect(() => {
+    loadContacts();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // CSV upload now UPSERTS into Supabase (by email) instead of just
+  // loading into memory — the DB becomes the single source of truth,
+  // so nobody has to re-upload the file every visit.
   const onFile = (e) => {
     const f = e.target.files?.[0];
     if (!f) return;
     setErr("");
+    setDbNote("");
     Papa.parse(f, {
       header: true,
       skipEmptyLines: true,
-      complete: (r) => {
+      complete: async (r) => {
         const rows = r.data
-          .map((x, i) => ({
-            id: i,
-            email: (x.email || "").trim(),
+          .map((x) => ({
+            email: (x.email || "").trim().toLowerCase(),
             org: (x.org || "").trim(),
             person: (x.person || "").trim(),
             title: (x.title || "").trim(),
             country: (x.country || "").trim(),
             type: (x.type || "").trim(),
             notes: (x.notes || "").trim(),
-            sendable: (x.sendable || "YES").trim(),
+            sendable: (x.sendable || "YES").trim() || "YES",
           }))
-          .filter((x) => x.email && x.sendable === "YES");
+          .filter((x) => x.email);
         if (!rows.length) {
-          setErr("보낼 수 있는 행이 없습니다. email과 sendable=YES 컬럼을 확인하세요.");
+          setErr("업로드할 행이 없습니다. email 컬럼을 확인하세요.");
           return;
         }
-        setContacts(rows);
+        setBusy("uploadContacts");
+        try {
+          const CHUNK = 500;
+          for (let i = 0; i < rows.length; i += CHUNK) {
+            const chunk = rows.slice(i, i + CHUNK);
+            const { error } = await supabase
+              .from("contacts")
+              .upsert(chunk, { onConflict: "email" });
+            if (error) throw error;
+          }
+          setDbNote(`${rows.length}건을 DB에 추가/업데이트했습니다.`);
+          await loadContacts();
+        } catch (e2) {
+          setDbNote("DB 업로드 실패: " + e2.message);
+        }
+        setBusy("");
         setScores({});
         setDrafts({});
       },
@@ -473,6 +681,20 @@ Rules:
     setBusy("");
   };
 
+  const filteredContacts = useMemo(() => {
+    const q = contactQuery.trim().toLowerCase();
+    return contacts.filter((c) => {
+      if (contactTypeFilter !== "ALL" && c.type !== contactTypeFilter) return false;
+      if (!q) return true;
+      return (
+        c.org.toLowerCase().includes(q) ||
+        c.person.toLowerCase().includes(q) ||
+        c.email.toLowerCase().includes(q) ||
+        c.notes.toLowerCase().includes(q)
+      );
+    });
+  }, [contacts, contactQuery, contactTypeFilter]);
+
   const pool = useMemo(() => {
     if (audience === "VC") return contacts.filter((c) => c.type.startsWith("VC"));
     if (audience === "CORPORATE_KR")
@@ -511,7 +733,7 @@ Link: ${startup.link}`;
     setProgress(0);
     const next = {};
     const BATCH = 20;      // contacts per API call
-    const CONCURRENCY = 2; // API calls running at once
+    const CONCURRENCY = 4; // real API key here, higher tier than the sandbox demo
 
     // build all batches up front
     const batches = [];
@@ -632,12 +854,13 @@ ${tone.rules}
 Never use these words: ${tone.banned}
 ${fewShot()}
 
-Return ONLY JSON, and inside the strings use no unescaped double quotes:
-{"subject":"...","body":"..."}`;
+OUTPUT FORMAT — follow exactly, no JSON, no markdown, no commentary:
+SUBJECT: <the subject line on one line>
+BODY:
+<the full email body, as many lines as needed>`;
 
     const out = await claude(prompt, 1400);
-    const j = parseJSON(out);
-    return { subject: j.subject, body: j.body, edited: false };
+    return { ...parseDraft(out), edited: false };
   };
 
   const runDrafts = async () => {
@@ -647,7 +870,7 @@ Return ONLY JSON, and inside the strings use no unescaped double quotes:
     setProgress(0);
     setErr("");
     const next = { ...drafts };
-    const CONCURRENCY = 2; // generate 5 drafts at once
+    const CONCURRENCY = 4; // real API key here, higher tier than the sandbox demo
     try {
       let done = 0;
       for (let w = 0; w < top.length; w += CONCURRENCY) {
@@ -715,17 +938,81 @@ Return ONLY JSON, and inside the strings use no unescaped double quotes:
       }
       const data = await res.json();
       const ok = (data.results || []).filter((r) => r.ok).length;
-      // mark those as sent-to-draft
       const ns = { ...sendStatus };
+      const ids = { ...gmailDraftIds };
       (data.results || []).forEach((r, i) => {
-        if (r.ok) ns[rows[i].id] = ns[rows[i].id] || "draft_in_gmail";
+        if (r.ok) {
+          ns[rows[i].id] = ns[rows[i].id] || "draft_in_gmail";
+          if (r.draftId) ids[rows[i].id] = r.draftId;
+        }
       });
       setSendStatus(ns);
-      setPushMsg(`${ok}건을 Gmail 초안함에 넣었습니다. Gmail에서 확인 후 보내세요.`);
+      setGmailDraftIds(ids);
+      setPushMsg(`${ok}건을 Gmail 초안함에 넣었습니다. 검토 후 대시보드에서 발송하거나 Gmail에서 직접 보내세요.`);
     } catch (e) {
       setPushMsg("실패: " + e.message);
     }
     setBusy("");
+  };
+
+  // Real send — actually delivers the email. Requires the draft to already
+  // exist in Gmail (pushToGmail must run first). Capped and confirmed.
+  const sendNow = async (ids) => {
+    const targets = ids
+      .filter((id) => gmailDraftIds[id])
+      .map((id) => ({ contactId: id, gmailDraftId: gmailDraftIds[id] }));
+    if (!targets.length) return;
+    setBusy("send");
+    setPushMsg("");
+    try {
+      const res = await fetch("/api/gmail/send", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ draftIds: targets }),
+      });
+      if (res.status === 401) {
+        setGmail("unknown");
+        setPushMsg("Gmail 연결이 필요합니다.");
+        setBusy("");
+        return;
+      }
+      const data = await res.json();
+      const ns = { ...sendStatus };
+      let ok = 0;
+      (data.results || []).forEach((r) => {
+        if (r.ok) {
+          ns[r.contactId] = "sent";
+          ok += 1;
+        }
+      });
+      setSendStatus(ns);
+      setPushMsg(
+        `${ok}건 실제 발송 완료.` +
+          (data.capped ? " (안전 한도 50건까지만 처리했습니다.)" : "")
+      );
+    } catch (e) {
+      setPushMsg("발송 실패: " + e.message);
+    }
+    setBusy("");
+  };
+
+  const sendOneNow = (id) => {
+    if (!window.confirm("이 메일을 지금 실제로 발송합니다. 되돌릴 수 없습니다. 계속할까요?"))
+      return;
+    sendNow([id]);
+  };
+
+  const sendAllDraftedNow = () => {
+    const ids = Object.keys(gmailDraftIds).filter(
+      (id) => sendStatus[id] !== "sent" && sendStatus[id] !== "replied"
+    );
+    if (!ids.length) return;
+    const typed = window.prompt(
+      `Gmail 초안함에 있는 ${ids.length}건을 지금 전부 실제 발송합니다.\n` +
+        `되돌릴 수 없습니다. 계속하려면 아래에 "발송" 이라고 입력하세요.`
+    );
+    if (typed !== "발송") return;
+    sendNow(ids);
   };
 
   const setStatus = (id, st) =>
@@ -752,12 +1039,12 @@ Return ONLY JSON, and inside the strings use no unescaped double quotes:
   if (!ready) return null;
 
   const TABS = [
-    ["data", "1 · 컨택"],
-    ["startup", "2 · 스타트업"],
-    ["match", "3 · 매칭"],
-    ["review", "4 · 초안 검토"],
-    ["dash", "대시보드"],
-    ["voice", "톤 설정"],
+    ["data", "1 · 컨택", Users],
+    ["startup", "2 · 스타트업", Building2],
+    ["match", "3 · 매칭", Sparkles],
+    ["review", "4 · 초안 검토", Mail],
+    ["dash", "대시보드", LayoutDashboard],
+    ["voice", "톤 설정", SlidersHorizontal],
   ];
 
   return (
@@ -774,69 +1061,124 @@ Return ONLY JSON, and inside the strings use no unescaped double quotes:
       {/* header */}
       <div
         style={{
-          background: C.ink,
-          padding: "16px 24px",
+          background: `linear-gradient(180deg, ${C.ink} 0%, #101923 100%)`,
+          padding: "15px 24px",
           display: "flex",
-          alignItems: "baseline",
+          alignItems: "center",
           gap: 14,
           flexWrap: "wrap",
+          borderBottom: `2px solid ${C.pine}`,
         }}
       >
         <div
           style={{
-            fontFamily: "Archivo, sans-serif",
-            fontWeight: 700,
-            fontSize: 15,
-            color: "#fff",
-            letterSpacing: "-0.01em",
+            width: 30,
+            height: 30,
+            borderRadius: 7,
+            background: `linear-gradient(135deg, ${C.pine} 0%, #4A8A73 100%)`,
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            flexShrink: 0,
           }}
         >
-          Lodestart Outreach Desk
+          <Compass size={17} color="#fff" strokeWidth={2.2} />
         </div>
-        <div
-          style={{
-            fontFamily: "'JetBrains Mono', monospace",
-            fontSize: 11,
-            color: "#8FA3AE",
-          }}
-        >
-          v1 · Gmail 초안 생성 (자동 발송 없음)
+        <div>
+          <div
+            style={{
+              fontFamily: "Archivo, sans-serif",
+              fontWeight: 700,
+              fontSize: 15,
+              color: "#fff",
+              letterSpacing: "-0.01em",
+              lineHeight: 1.2,
+            }}
+          >
+            Lodestart Outreach Desk
+          </div>
+          <div
+            style={{
+              fontFamily: "'JetBrains Mono', monospace",
+              fontSize: 10.5,
+              color: "#7C8FA0",
+              marginTop: 1,
+            }}
+          >
+            v1 · Gmail 초안 생성 · 실제 발송은 확인 후
+          </div>
         </div>
-        <div style={{ marginLeft: "auto", display: "flex", gap: 18, alignItems: "center" }}>
+
+        <div style={{ marginLeft: "auto", display: "flex", gap: 12, alignItems: "center" }}>
+          {/* estimated API usage this session */}
+          <div
+            title="Anthropic API 키는 잔여 크레딧을 직접 조회할 수 없어 이번 세션 사용량으로 추정한 값입니다."
+            style={{
+              display: "flex",
+              alignItems: "center",
+              gap: 6,
+              padding: "6px 11px",
+              borderRadius: 5,
+              border: "1px solid #2C3844",
+              background: "rgba(255,255,255,0.02)",
+            }}
+          >
+            <Sparkles size={12} color="#8FA3AE" />
+            <span
+              style={{
+                fontFamily: "'JetBrains Mono', monospace",
+                fontSize: 11,
+                color: "#C4D0DA",
+              }}
+            >
+              ≈ ${estCost.toFixed(3)} 사용
+            </span>
+            <span style={{ fontSize: 10, color: "#5C6B7A" }}>(추정)</span>
+          </div>
+
           <a
             href="/api/auth/google"
             style={{
+              display: "flex",
+              alignItems: "center",
+              gap: 6,
               textDecoration: "none",
               fontFamily: "Inter, sans-serif",
               fontSize: 12,
               fontWeight: 600,
               padding: "7px 12px",
-              borderRadius: 4,
+              borderRadius: 5,
               border: `1px solid ${gmail === "connected" ? "#3E7D5A" : "#3A4652"}`,
-              background: gmail === "connected" ? "#294B39" : "transparent",
+              background: gmail === "connected" ? "#1F3B2C" : "transparent",
               color: gmail === "connected" ? "#B7E4C7" : "#C4D0DA",
+              transition: "all .15s",
             }}
           >
-            {gmail === "connected" ? "● Gmail 연결됨" : "Gmail 연결"}
+            <Mail size={13} />
+            {gmail === "connected" ? "Gmail 연결됨" : "Gmail 연결"}
           </a>
-          {[
-            ["컨택", contacts.length],
-            ["매칭", Object.keys(scores).length],
-            ["초안", Object.keys(drafts).length],
-          ].map(([l, n]) => (
-            <div key={l} style={{ textAlign: "right" }}>
-              <div
-                style={{
-                  fontFamily: "'JetBrains Mono', monospace",
-                  fontSize: 15,
-                  color: "#fff",
-                }}
-              >
-                {n}
+
+          <div style={{ display: "flex", gap: 16 }}>
+            {[
+              ["컨택", contacts.length],
+              ["매칭", Object.keys(scores).length],
+              ["초안", Object.keys(drafts).length],
+            ].map(([l, n]) => (
+              <div key={l} style={{ textAlign: "right" }}>
+                <div
+                  style={{
+                    fontFamily: "'JetBrains Mono', monospace",
+                    fontSize: 15,
+                    color: "#fff",
+                    lineHeight: 1,
+                  }}
+                >
+                  {n}
+                </div>
+                <div style={{ fontSize: 9.5, color: "#7C8FA0", marginTop: 2 }}>{l}</div>
               </div>
-              <div style={{ fontSize: 10, color: "#8FA3AE" }}>{l}</div>
-            </div>
-          ))}
+            ))}
+          </div>
         </div>
       </div>
 
@@ -851,23 +1193,30 @@ Return ONLY JSON, and inside the strings use no unescaped double quotes:
           overflowX: "auto",
         }}
       >
-        {TABS.map(([id, label]) => (
+        {TABS.map(([id, label, Icon]) => (
           <button
             key={id}
             onClick={() => setTab(id)}
             style={{
-              background: "transparent",
+              display: "flex",
+              alignItems: "center",
+              gap: 6,
+              background: tab === id ? C.pineSoft : "transparent",
               border: "none",
+              borderRadius: "6px 6px 0 0",
               borderBottom: `2px solid ${tab === id ? C.pine : "transparent"}`,
-              color: tab === id ? C.ink : C.mute,
-              padding: "13px 14px",
+              color: tab === id ? C.pine : C.mute,
+              padding: "11px 14px",
+              marginTop: 6,
               fontFamily: "Inter, sans-serif",
               fontSize: 13,
               fontWeight: tab === id ? 600 : 500,
               cursor: "pointer",
               whiteSpace: "nowrap",
+              transition: "all .15s",
             }}
           >
+            <Icon size={14} strokeWidth={tab === id ? 2.4 : 2} />
             {label}
           </button>
         ))}
@@ -889,6 +1238,14 @@ Return ONLY JSON, and inside the strings use no unescaped double quotes:
               ? "IR 자료에서 프로필 추출 중…"
               : busy === "match"
               ? `매칭 중… ${progress}%`
+              : busy === "push"
+              ? "Gmail 초안함에 넣는 중…"
+              : busy === "send"
+              ? "발송 중…"
+              : busy === "loadContacts"
+              ? "컨택 DB 불러오는 중…"
+              : busy === "uploadContacts"
+              ? "컨택 DB에 업로드 중…"
               : `초안 생성 중… ${progress}%`)}
         </div>
       )}
@@ -896,18 +1253,96 @@ Return ONLY JSON, and inside the strings use no unescaped double quotes:
       <div style={{ maxWidth: 1080, margin: "0 auto", padding: "24px 24px 80px" }}>
         {/* ------------------------------ DATA ---------------------------- */}
         {tab === "data" && (
-          <Card>
-            <H sub="contacts_master.csv를 올리세요. sendable=YES 인 행만 불러옵니다.">
-              컨택 불러오기
-            </H>
-            <input
-              type="file"
-              accept=".csv"
-              onChange={onFile}
-              style={{ fontSize: 13, fontFamily: "Inter" }}
-            />
-            {contacts.length > 0 && (
-              <div style={{ marginTop: 22 }}>
+          <div>
+            <Card style={{ marginBottom: 16 }}>
+              <div
+                style={{
+                  display: "flex",
+                  alignItems: "flex-start",
+                  justifyContent: "space-between",
+                  gap: 16,
+                  flexWrap: "wrap",
+                }}
+              >
+                <H icon={Database} sub="모든 컨택은 Supabase DB에 저장되어 다음에 다시 방문해도 그대로 남아있습니다.">
+                  컨택 데이터베이스
+                </H>
+                <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+                  <Btn
+                    kind="ghost"
+                    small
+                    icon={RefreshCw}
+                    onClick={loadContacts}
+                    disabled={!!busy}
+                  >
+                    새로고침
+                  </Btn>
+                  <label>
+                    <span
+                      style={{
+                        display: "inline-flex",
+                        alignItems: "center",
+                        gap: 6,
+                        padding: "9px 16px",
+                        borderRadius: 5,
+                        background: C.pine,
+                        color: "#fff",
+                        fontFamily: "Inter, sans-serif",
+                        fontSize: 13,
+                        fontWeight: 600,
+                        cursor: busy ? "not-allowed" : "pointer",
+                        opacity: busy ? 0.5 : 1,
+                      }}
+                    >
+                      <FileUp size={14} />
+                      CSV 업로드 (DB에 추가·업데이트)
+                    </span>
+                    <input
+                      type="file"
+                      accept=".csv"
+                      onChange={onFile}
+                      disabled={!!busy}
+                      style={{ display: "none" }}
+                    />
+                  </label>
+                </div>
+              </div>
+
+              {dbNote && (
+                <div
+                  style={{
+                    marginTop: 4,
+                    marginBottom: 14,
+                    padding: "9px 12px",
+                    borderRadius: 4,
+                    background: C.pineSoft,
+                    color: C.pine,
+                    fontSize: 12,
+                  }}
+                >
+                  {dbNote}
+                </div>
+              )}
+
+              {contacts.length === 0 && busy !== "loadContacts" && (
+                <div
+                  style={{
+                    padding: "30px 10px",
+                    textAlign: "center",
+                    color: C.mute,
+                    fontSize: 13,
+                  }}
+                >
+                  <Database size={26} color={C.line} style={{ marginBottom: 8 }} />
+                  <div>DB가 비어있습니다. CSV를 업로드해서 시작하세요.</div>
+                  <div style={{ fontSize: 11, marginTop: 4 }}>
+                    이메일이 이미 있는 행은 자동으로 최신 정보로 업데이트되고, 새 이메일은
+                    추가됩니다 (중복 없음).
+                  </div>
+                </div>
+              )}
+
+              {contacts.length > 0 && (
                 <div
                   style={{
                     display: "grid",
@@ -921,12 +1356,19 @@ Return ONLY JSON, and inside the strings use no unescaped double quotes:
                       return a;
                     }, {})
                   ).map(([t, n]) => (
-                    <div
+                    <button
                       key={t}
+                      onClick={() =>
+                        setContactTypeFilter(contactTypeFilter === t ? "ALL" : t)
+                      }
                       style={{
-                        border: `1px solid ${C.line}`,
-                        borderRadius: 4,
+                        textAlign: "left",
+                        cursor: "pointer",
+                        border: `1px solid ${contactTypeFilter === t ? C.pine : C.line}`,
+                        background: contactTypeFilter === t ? C.pineSoft : C.surface,
+                        borderRadius: 6,
                         padding: "10px 12px",
+                        transition: "all .12s",
                       }}
                     >
                       <div
@@ -939,15 +1381,144 @@ Return ONLY JSON, and inside the strings use no unescaped double quotes:
                         {n}
                       </div>
                       <div style={{ fontSize: 11, color: C.mute }}>{t}</div>
-                    </div>
+                    </button>
                   ))}
                 </div>
-                <div style={{ marginTop: 18 }}>
-                  <Btn onClick={() => setTab("startup")}>다음 · 스타트업 입력</Btn>
+              )}
+            </Card>
+
+            {contacts.length > 0 && (
+              <Card pad={0}>
+                <div
+                  style={{
+                    display: "flex",
+                    alignItems: "center",
+                    gap: 10,
+                    padding: "12px 16px",
+                    borderBottom: `1px solid ${C.line}`,
+                  }}
+                >
+                  <div style={{ position: "relative", flex: 1, maxWidth: 340 }}>
+                    <Search
+                      size={14}
+                      color={C.mute}
+                      style={{ position: "absolute", left: 10, top: 10 }}
+                    />
+                    <input
+                      value={contactQuery}
+                      onChange={(e) => setContactQuery(e.target.value)}
+                      placeholder="회사, 담당자, 이메일로 검색"
+                      style={{
+                        width: "100%",
+                        boxSizing: "border-box",
+                        padding: "8px 10px 8px 30px",
+                        border: `1px solid ${C.line}`,
+                        borderRadius: 5,
+                        fontSize: 13,
+                        fontFamily: "Inter, sans-serif",
+                        outline: "none",
+                      }}
+                    />
+                  </div>
+                  {contactTypeFilter !== "ALL" && (
+                    <Btn small kind="ghost" onClick={() => setContactTypeFilter("ALL")}>
+                      {contactTypeFilter} 필터 해제
+                    </Btn>
+                  )}
+                  <div style={{ marginLeft: "auto", fontSize: 12, color: C.mute }}>
+                    {filteredContacts.length.toLocaleString()}건
+                    {filteredContacts.length !== contacts.length &&
+                      ` / 전체 ${contacts.length.toLocaleString()}건`}
+                  </div>
                 </div>
+
+                <div style={{ maxHeight: 460, overflowY: "auto" }}>
+                  {filteredContacts.slice(0, 300).map((c) => (
+                    <div
+                      key={c.id}
+                      style={{
+                        display: "flex",
+                        alignItems: "center",
+                        gap: 12,
+                        padding: "9px 16px",
+                        borderBottom: `1px solid ${C.line}`,
+                        fontSize: 12.5,
+                      }}
+                    >
+                      <div
+                        style={{
+                          width: 92,
+                          flexShrink: 0,
+                          fontSize: 10,
+                          fontWeight: 600,
+                          color: C.mute,
+                          overflow: "hidden",
+                          textOverflow: "ellipsis",
+                          whiteSpace: "nowrap",
+                        }}
+                      >
+                        {c.type}
+                      </div>
+                      <div style={{ flex: "1 1 220px", minWidth: 0 }}>
+                        <div
+                          style={{
+                            fontWeight: 600,
+                            overflow: "hidden",
+                            textOverflow: "ellipsis",
+                            whiteSpace: "nowrap",
+                          }}
+                        >
+                          {c.org}
+                        </div>
+                        {c.person && (
+                          <div style={{ color: C.mute, fontSize: 11 }}>
+                            {c.person}
+                            {c.title ? ` · ${c.title}` : ""}
+                          </div>
+                        )}
+                      </div>
+                      <div
+                        style={{
+                          flex: "1 1 220px",
+                          minWidth: 0,
+                          fontFamily: "'JetBrains Mono', monospace",
+                          fontSize: 11.5,
+                          color: C.mute,
+                          overflow: "hidden",
+                          textOverflow: "ellipsis",
+                          whiteSpace: "nowrap",
+                        }}
+                      >
+                        {c.email}
+                      </div>
+                      <div style={{ width: 70, flexShrink: 0, color: C.mute, fontSize: 11 }}>
+                        {c.country}
+                      </div>
+                    </div>
+                  ))}
+                  {filteredContacts.length > 300 && (
+                    <div
+                      style={{
+                        padding: 14,
+                        textAlign: "center",
+                        fontSize: 11,
+                        color: C.mute,
+                      }}
+                    >
+                      상위 300건만 표시했습니다. 검색으로 좁혀보세요. (매칭에는 필터와 무관하게
+                      전체가 사용됩니다.)
+                    </div>
+                  )}
+                </div>
+              </Card>
+            )}
+
+            {contacts.length > 0 && (
+              <div style={{ marginTop: 16 }}>
+                <Btn onClick={() => setTab("startup")}>다음 · 스타트업 입력</Btn>
               </div>
             )}
-          </Card>
+          </div>
         )}
 
         {/* ---------------------------- STARTUP --------------------------- */}
@@ -967,9 +1538,11 @@ Return ONLY JSON, and inside the strings use no unescaped double quotes:
               {/* IR deck autofill */}
               <label
                 style={{
-                  display: "block",
+                  display: "flex",
+                  alignItems: "center",
+                  gap: 12,
                   border: `1.5px dashed ${busy === "extract" ? C.pine : C.line}`,
-                  borderRadius: 6,
+                  borderRadius: 8,
                   padding: "14px 16px",
                   marginBottom: 18,
                   cursor: busy ? "default" : "pointer",
@@ -977,7 +1550,25 @@ Return ONLY JSON, and inside the strings use no unescaped double quotes:
                   transition: "all .15s",
                 }}
               >
-                <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                <div
+                  style={{
+                    width: 34,
+                    height: 34,
+                    borderRadius: 7,
+                    background: busy === "extract" ? "#fff" : C.pineSoft,
+                    display: "flex",
+                    alignItems: "center",
+                    justifyContent: "center",
+                    flexShrink: 0,
+                  }}
+                >
+                  {busy === "extract" ? (
+                    <Loader2 size={17} color={C.pine} className="spin" />
+                  ) : (
+                    <FileUp size={17} color={C.pine} />
+                  )}
+                </div>
+                <div>
                   <div
                     style={{
                       fontFamily: "Archivo, sans-serif",
@@ -988,7 +1579,7 @@ Return ONLY JSON, and inside the strings use no unescaped double quotes:
                   >
                     {busy === "extract" ? "IR 자료 읽는 중…" : "IR 자료 업로드 (PDF/이미지)"}
                   </div>
-                  <div style={{ fontSize: 11, color: C.mute }}>
+                  <div style={{ fontSize: 11, color: C.mute, marginTop: 1 }}>
                     {busy === "extract"
                       ? "잠시만요, 아래 항목을 자동으로 채웁니다"
                       : "던져주면 아래 항목을 자동으로 채웁니다 · 검토 후 수정하세요"}
@@ -1310,11 +1901,17 @@ Return ONLY JSON, and inside the strings use no unescaped double quotes:
                   {lang === "KO" ? "한국어로 다시 생성" : "Regenerate in English"}
                 </Btn>
                 <Btn
+                  icon={FileUp}
                   onClick={pushToGmail}
                   disabled={!Object.keys(drafts).length || !!busy}
                 >
                   {busy === "push" ? "넣는 중…" : "Gmail 초안함에 넣기"}
                 </Btn>
+                {Object.keys(gmailDraftIds).length > 0 && (
+                  <Btn kind="danger" icon={Send} onClick={sendAllDraftedNow} disabled={!!busy}>
+                    전체 실제 발송
+                  </Btn>
+                )}
                 <Btn kind="ghost" onClick={exportCsv} disabled={!Object.keys(drafts).length}>
                   CSV 내보내기
                 </Btn>
@@ -1454,6 +2051,36 @@ Return ONLY JSON, and inside the strings use no unescaped double quotes:
                             >
                               다시 쓰기
                             </Btn>
+                            <div style={{ flex: 1 }} />
+                            {gmailDraftIds[c.id] &&
+                              sendStatus[c.id] !== "sent" &&
+                              sendStatus[c.id] !== "replied" && (
+                                <Btn
+                                  small
+                                  kind="danger"
+                                  icon={Send}
+                                  onClick={() => sendOneNow(c.id)}
+                                  disabled={!!busy}
+                                >
+                                  지금 발송
+                                </Btn>
+                              )}
+                            {(sendStatus[c.id] === "sent" ||
+                              sendStatus[c.id] === "replied") && (
+                              <span
+                                style={{
+                                  display: "flex",
+                                  alignItems: "center",
+                                  gap: 5,
+                                  fontSize: 11,
+                                  fontWeight: 600,
+                                  color: C.pine,
+                                  padding: "6px 10px",
+                                }}
+                              >
+                                <Check size={13} /> 발송 완료
+                              </span>
+                            )}
                           </div>
                         </div>
                       </div>
@@ -1464,7 +2091,19 @@ Return ONLY JSON, and inside the strings use no unescaped double quotes:
 
             {!Object.keys(drafts).length && (
               <Card>
-                <div style={{ color: C.mute, fontSize: 13, textAlign: "center", padding: 30 }}>
+                <div
+                  style={{
+                    color: C.mute,
+                    fontSize: 13,
+                    textAlign: "center",
+                    padding: 40,
+                    display: "flex",
+                    flexDirection: "column",
+                    alignItems: "center",
+                    gap: 8,
+                  }}
+                >
+                  <Mail size={26} color={C.line} strokeWidth={1.6} />
                   초안이 없습니다. 매칭 탭에서 생성하세요.
                 </div>
               </Card>
@@ -1582,7 +2221,18 @@ Return ONLY JSON, and inside the strings use no unescaped double quotes:
                         fontWeight: 600,
                       }}
                     >
-                      발송 상태 기록 — Gmail에서 보낸 뒤 여기서 상태를 눌러주세요
+                      발송 상태 기록
+                      <div
+                        style={{
+                          fontSize: 11,
+                          fontWeight: 400,
+                          color: C.mute,
+                          marginTop: 3,
+                        }}
+                      >
+                        앱에서 "지금 발송"으로 보내면 자동으로 기록됩니다. Gmail 앱에서 직접
+                        보냈거나 회신을 받았다면 아래 버튼으로 직접 표시해주세요.
+                      </div>
                     </div>
                     <div style={{ maxHeight: 420, overflowY: "auto" }}>
                       {withDrafts.length === 0 && (
@@ -1622,6 +2272,13 @@ Return ONLY JSON, and inside the strings use no unescaped double quotes:
                               {c.email}
                             </div>
                           </div>
+                          {gmailDraftIds[c.id] &&
+                            sendStatus[c.id] !== "sent" &&
+                            sendStatus[c.id] !== "replied" && (
+                              <Btn small kind="danger" icon={Send} onClick={() => sendOneNow(c.id)}>
+                                발송
+                              </Btn>
+                            )}
                           {[
                             ["draft", "초안"],
                             ["sent", "보냄"],
@@ -1647,6 +2304,7 @@ Return ONLY JSON, and inside the strings use no unescaped double quotes:
                                   border: `1px solid ${on ? C.pine : C.line}`,
                                   background: on ? C.pine : "transparent",
                                   color: on ? "#fff" : C.mute,
+                                  transition: "all .12s",
                                 }}
                               >
                                 {label}
