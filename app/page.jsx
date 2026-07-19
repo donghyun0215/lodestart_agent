@@ -63,6 +63,12 @@ const AUDIENCES = {
     hint: "기관의 오픈이노베이션 챌린지·프로그램 주제와의 연결고리",
     cta: "Is there an upcoming challenge or programme this could fit?",
   },
+  TEST: {
+    label: "🧪 테스트 (더미 데이터)",
+    goal: "워크플로우 점검용 — 실제 고객 아님",
+    hint: "실제 사업 연관성은 무시하고, 매칭·초안 형식이 정상 작동하는지만 본다",
+    cta: "(테스트) Would you be open to a short intro call?",
+  },
 };
 
 const DEFAULT_SENDER = {
@@ -696,11 +702,17 @@ Rules:
   }, [contacts, contactQuery, contactTypeFilter]);
 
   const pool = useMemo(() => {
-    if (audience === "VC") return contacts.filter((c) => c.type.startsWith("VC"));
+    if (audience === "TEST") return contacts.filter((c) => c.type === "TEST");
+    if (audience === "VC")
+      return contacts.filter((c) => c.type.startsWith("VC") && c.type !== "TEST");
     if (audience === "CORPORATE_KR")
       return contacts.filter((c) => c.type === "CORPORATE_KR");
     return contacts.filter(
-      (c) => c.type === "ACCELERATOR" || c.type === "INSTITUTION" || c.type === "AGENCY"
+      (c) =>
+        c.type === "ACCELERATOR" ||
+        c.type === "INSTITUTION" ||
+        c.type === "AGENCY" ||
+        c.type === "INTERMEDIARY"
     );
   }, [contacts, audience]);
 
@@ -1651,6 +1663,24 @@ BODY:
 
             <Card>
               <H sub="누구에게 보낼지 정합니다.">캠페인</H>
+              {audience === "TEST" && (
+                <div
+                  style={{
+                    marginBottom: 12,
+                    padding: "9px 12px",
+                    borderRadius: 5,
+                    background: "#FBF3D9",
+                    border: "1px solid #E0C15C",
+                    color: "#7A611F",
+                    fontSize: 11.5,
+                    lineHeight: 1.5,
+                  }}
+                >
+                  🧪 테스트 모드입니다. 전부 더미 회사이고, 이메일은 Gmail 별칭(+test)으로
+                  전부 본인 받은편지함으로 옵니다. 실제 발송을 눌러도 안전하지만, KOCHAM
+                  실제 회원사와 절대 섞이지 않습니다.
+                </div>
+              )}
               <div
                 style={{
                   fontSize: 11,
@@ -1665,11 +1695,13 @@ BODY:
               </div>
               {Object.entries(AUDIENCES).map(([k, a]) => {
                 const n = contacts.filter((c) =>
-                  k === "VC"
-                    ? c.type.startsWith("VC")
+                  k === "TEST"
+                    ? c.type === "TEST"
+                    : k === "VC"
+                    ? c.type.startsWith("VC") && c.type !== "TEST"
                     : k === "CORPORATE_KR"
                     ? c.type === "CORPORATE_KR"
-                    : ["ACCELERATOR", "INSTITUTION", "AGENCY"].includes(c.type)
+                    : ["ACCELERATOR", "INSTITUTION", "AGENCY", "INTERMEDIARY"].includes(c.type)
                 ).length;
                 const on = audience === k;
                 return (
