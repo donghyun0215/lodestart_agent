@@ -1120,6 +1120,7 @@ BODY:
         to: c.email,
         subject: drafts[c.id].subject,
         body: drafts[c.id].body,
+        existingDraftId: gmailDraftIds[c.id] || null,
       }));
     if (!rows.length) return;
     setBusy("push");

@@ -35,16 +35,23 @@ function buildRaw({ to, subject, body }) {
     .replace(/=+$/, "");
 }
 
-async function createDraft(accessToken, msg) {
-  const res = await fetch("https://gmail.googleapis.com/gmail/v1/users/me/drafts", {
-    method: "POST",
+// Create a new draft, OR update an existing one in place when we already
+// have its id. Updating matters: clicking "Gmail 초안함에 넣기" twice used
+// to leave two separate drafts in Gmail for the same contact, and we'd only
+// track the newest one — so if the person sent the older copy, our
+// "has this draft disappeared?" check kept saying "still there".
+async function upsertDraft(accessToken, msg, existingDraftId) {
+  const url = existingDraftId
+    ? `https://gmail.googleapis.com/gmail/v1/users/me/drafts/${existingDraftId}`
+    : "https://gmail.googleapis.com/gmail/v1/users/me/drafts";
+  return fetch(url, {
+    method: existingDraftId ? "PUT" : "POST",
     headers: {
       authorization: `Bearer ${accessToken}`,
       "content-type": "application/json",
     },
     body: JSON.stringify({ message: { raw: buildRaw(msg) } }),
   });
-  return res;
 }
 
 export async function POST(req) {
@@ -65,14 +72,19 @@ export async function POST(req) {
 
     const results = [];
     for (const d of drafts) {
-      let res = await createDraft(accessToken, d);
+      let res = await upsertDraft(accessToken, d, d.existingDraftId);
       // token expired -> refresh once and retry
       if (res.status === 401 && refresh) {
         const r = await refreshToken(refresh);
         if (r.access_token) {
           accessToken = r.access_token;
-          res = await createDraft(accessToken, d);
+          res = await upsertDraft(accessToken, d, d.existingDraftId);
         }
+      }
+      // The draft we tried to update is gone (already sent, or deleted by
+      // hand) -> fall back to creating a fresh one.
+      if (res.status === 404 && d.existingDraftId) {
+        res = await upsertDraft(accessToken, d, null);
       }
       const ok = res.ok;
       let draftId = null;
