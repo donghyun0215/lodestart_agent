@@ -1395,15 +1395,24 @@ Return ONLY a JSON array, no prose:
   const fewShot = () => {
     const recent = edits.slice(-5);
     if (!recent.length) return "";
+    // Examples are shown oldest -> newest, but the model is told the newest
+    // is the current preference. Without this, an early edit and a later,
+    // conflicting one were treated as equally authoritative and the model
+    // would blend them instead of following what Tammy actually wants now.
     return (
-      "\n\nTammy has edited past drafts. Learn from these before/after pairs:\n" +
+      "\n\nTammy has edited past drafts, shown oldest to newest. If any of these " +
+      "conflict with each other, the MOST RECENT one (the last example) reflects " +
+      "her current preference — follow that one:\n" +
       recent
-        .map(
-          (e, i) =>
-            `--- Example ${i + 1} ---\nBEFORE (AI):\n${e.before}\n\nAFTER (Tammy's version):\n${e.after}`
-        )
+        .map((e, i) => {
+          const tag =
+            i === recent.length - 1 && recent.length > 1
+              ? " [MOST RECENT — follow this if it conflicts with earlier examples]"
+              : "";
+          return `--- Example ${i + 1}${tag} ---\nBEFORE (AI):\n${e.before}\n\nAFTER (Tammy's version):\n${e.after}`;
+        })
         .join("\n\n") +
-      "\n\nMatch the AFTER style."
+      "\n\nMatch the style of the most recent example."
     );
   };
 
