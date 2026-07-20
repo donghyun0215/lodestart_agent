@@ -85,6 +85,57 @@ const DEFAULT_SENDER = {
   signoff: "Best regards,",
 };
 
+// Types the contacts table actually uses. VC and VC_CRYPTO_LIST are kept as
+// separate stored values on purpose — the matching pool already treats them
+// as one group, and keeping the tag means a crypto-only view is still
+// possible later. Merging them destructively would not be reversible.
+const TYPE_OPTIONS = [
+  "VC",
+  "VC_CRYPTO_LIST",
+  "CORPORATE_KR",
+  "ACCELERATOR",
+  "INSTITUTION",
+  "AGENCY",
+  "INTERMEDIARY",
+  "TEST",
+];
+
+// A startup profile. `offer` is the field that was missing: the concrete,
+// time-boxed thing on the table (e.g. a free trial for chamber members).
+// Tammy was adding that by hand to every draft because the model had nowhere
+// to read it from.
+const EMPTY_STARTUP = {
+  name: "", oneLiner: "", sector: "", tech: "",
+  traction: "", ask: "", offer: "", link: "",
+};
+
+// One email may introduce at most this many startups. The limit is editorial,
+// not technical: past three it stops reading as a considered match and starts
+// reading as a catalogue.
+const DECK_PROMPT = `This is a startup's IR deck / pitch material. Extract a concise outreach profile.
+
+Return ONLY JSON, no prose, no markdown, and use no unescaped double quotes inside strings:
+{
+ "name": "company name",
+ "oneLiner": "one sentence, what the company does",
+ "sector": "e.g. Logistics / Robotics",
+ "tech": "the core technology / how it works, 1-2 sentences",
+ "traction": "concrete proof: revenue, clients, users, funding stage. Numbers if present.",
+ "ask": "what a partner or customer could offer them (PoC site, pilot, distribution, etc). If not stated, infer briefly.",
+ "link": "website URL if present, else empty string"
+}
+Rules:
+- Use the deck's own facts. Do NOT invent numbers or clients.
+- If a field is genuinely not in the deck, use an empty string.
+- Keep each field short enough to fit a form input.
+- Write values in the deck's primary language (Korean deck -> Korean values).`;
+
+const MAX_BUNDLE = 3;
+
+// A startup must clear this score for a contact before it is eligible to ride
+// along in that contact's email.
+const BUNDLE_MIN = 65;
+
 const DEFAULT_TONE = {
   rules:
     "- Warm but businesslike. No hype, no superlatives.\n" +
@@ -101,6 +152,10 @@ const K = {
   edits: "ld:edits",
   startups: "ld:startups",
   prefs: "ld:prefs", // last audience/lang selected — helps land back on the right view after refresh
+  extras: "ld:extras",   // additional startup profiles in a multi-startup campaign
+  multi: "ld:multi",     // per-startup scores, kept so a refresh does not lose the bundling
+  bundleOff: "ld:bundleOff2", // { [contactId]: [excludedStartupName, ...] } — per-startup, not all-or-nothing
+  coherence: "ld:coherence", // { [contactId]: { ok: bool, reason } } — does the qualifying set read as one story?
   draftStartup: "ld:draftStartup", // whatever's currently typed, saved continuously — not just on "저장" click
 };
 
@@ -483,15 +538,16 @@ export default function App() {
   const [startups, setStartups] = useState([]);
   const [ready, setReady] = useState(false);
 
-  const [startup, setStartup] = useState({
-    name: "",
-    oneLiner: "",
-    sector: "",
-    tech: "",
-    traction: "",
-    ask: "",
-    link: "",
-  });
+  const [startup, setStartup] = useState({ ...EMPTY_STARTUP });
+  // Additional profiles beyond the primary one. Deliberately kept separate
+  // from `startup` so every existing single-startup path keeps working.
+  const [extraStartups, setExtraStartups] = useState([]);
+  // contactId -> { startupName: {score, reason} }. `scores` stays the
+  // best-of-all view the rest of the UI already reads, so nothing downstream
+  // needed to change.
+  const [multiScores, setMultiScores] = useState({});
+  const [bundleOff, setBundleOff] = useState({}); // contactId -> [excluded startup names]
+  const [coherence, setCoherence] = useState({}); // contactId -> { ok, reason }
 
   const [audience, setAudience] = useState("CORPORATE_KR");
   const [limit, setLimit] = useState("15"); // free text while typing — validated on run, not per keystroke
@@ -513,16 +569,28 @@ export default function App() {
   const [usage, setUsage] = useState({ in: 0, out: 0, calls: 0 });
   const [campaignId, setCampaignId] = useState(null);
   const [restoredNote, setRestoredNote] = useState("");
+  const [editNote, setEditNote] = useState("");
+  // Who is signed in via Gmail OAuth, and are they on a Lodestart domain?
+  // Server-verified in /api/auth/status — this state is only for the UI.
+  const [account, setAccount] = useState({ email: "", staff: false });
 
   // Find the most recent campaign for this startup+audience, or create one.
   // Campaign identity is (startup name, audience) — regenerating in a
   // different language just updates the same campaign's rows.
+  // Campaign identity is (startup set, audience). With multiple startups the
+  // set is joined into one key so a bundled run doesn't collide with, or
+  // overwrite, the single-startup runs it was built from.
+  const campaignKey = () =>
+    allStartups.length > 1
+      ? allStartups.map((t) => t.name).sort().join(" + ")
+      : startup.name;
+
   const getOrCreateCampaignId = async () => {
     if (!startup.name) return null;
     const { data: found, error: findErr } = await supabase
       .from("campaigns")
       .select("id")
-      .eq("startup", startup.name)
+      .eq("startup", campaignKey())
       .eq("audience", audience)
       .order("created_at", { ascending: false })
       .limit(1);
@@ -533,7 +601,7 @@ export default function App() {
     }
     const { data: created, error: createErr } = await supabase
       .from("campaigns")
-      .insert({ startup: startup.name, audience, lang })
+      .insert({ startup: campaignKey(), audience, lang })
       .select()
       .single();
     if (createErr) throw createErr;
@@ -604,6 +672,7 @@ export default function App() {
       .then((r) => r.json())
       .then((d) => {
         if (d.connected) setGmail((prev) => (prev === "error" ? prev : "connected"));
+        setAccount({ email: d.email || "", staff: !!d.staff });
       })
       .catch(() => {});
   }, []);
@@ -613,6 +682,11 @@ export default function App() {
       setSender(await loadKey(K.sender, DEFAULT_SENDER));
       setTone(await loadKey(K.tone, DEFAULT_TONE));
       setEdits(await loadKey(K.edits, []));
+      setExtraStartups(await loadKey(K.extras, []));
+      const savedMulti = await loadKey(K.multi, {});
+      setMultiScores(savedMulti);
+      setBundleOff(await loadKey(K.bundleOff, {}));
+      setCoherence(await loadKey(K.coherence, {}));
       const s = await loadKey(K.startups, []);
       setStartups(s);
       // Whatever was last typed (even if "프로필 저장" was never clicked)
@@ -638,7 +712,8 @@ export default function App() {
   useEffect(() => {
     if (!ready) return;
     saveKey(K.draftStartup, startup);
-  }, [ready, startup]);
+    saveKey(K.extras, extraStartups);
+  }, [ready, startup, extraStartups]);
 
   // Remember the last tab/audience/lang picked, so a refresh lands back on
   // the same screen instead of always bouncing to "1 · 컨택"
@@ -660,7 +735,7 @@ export default function App() {
         const { data: camp, error: campErr } = await supabase
           .from("campaigns")
           .select("id")
-          .eq("startup", startup.name)
+          .eq("startup", campaignKey())
           .eq("audience", audience)
           .order("created_at", { ascending: false })
           .limit(1);
@@ -677,7 +752,15 @@ export default function App() {
         const sc = {}, dr = {}, st = {}, gd = {}, td = {};
         rows.forEach((r) => {
           if (r.fit !== null && r.fit !== undefined) sc[r.contact_id] = { score: r.fit, reason: "" };
-          if (r.subject || r.body) dr[r.contact_id] = { subject: r.subject || "", body: r.body || "", edited: false };
+          // orig must be set here too — otherwise a draft restored after a
+          // page refresh has no baseline and commitEdit can't learn from it.
+          if (r.subject || r.body)
+            dr[r.contact_id] = {
+              subject: r.subject || "",
+              body: r.body || "",
+              orig: r.body || "",
+              edited: false,
+            };
           if (r.status) st[r.contact_id] = r.status;
           if (r.gmail_draft_id) gd[r.contact_id] = r.gmail_draft_id;
           if (r.thread_id) td[r.contact_id] = r.thread_id;
@@ -700,12 +783,169 @@ export default function App() {
       cancelled = true;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [ready, contacts.length, startup.name, audience]);
+  }, [ready, contacts.length, startup.name, extraStartups.length, audience]);
 
   /* ---------------------------- csv ingest ---------------------------- */
   const [contactQuery, setContactQuery] = useState("");
   const [contactTypeFilter, setContactTypeFilter] = useState("ALL");
+  const [newContact, setNewContact] = useState({ email: "", org: "", person: "", title: "", country: "", type: "CORPORATE_KR", notes: "" });
+  const [bulkPasteText, setBulkPasteText] = useState("");
   const [dbNote, setDbNote] = useState("");
+
+  // Inline contact correction. The imported list has real mistakes in it
+  // (Korean funds tagged as Singapore, crypto/traditional VC mixed up), and
+  // re-uploading a hand-edited CSV to fix them is error-prone. These let the
+  // record be corrected in place, one row or many at once.
+  const [editingId, setEditingId] = useState(null);
+  const [editRow, setEditRow] = useState(null);
+  const [selectedIds, setSelectedIds] = useState([]);
+  const [bulkType, setBulkType] = useState("");
+  const [bulkCountry, setBulkCountry] = useState("");
+
+  const startEditContact = (c) => {
+    setEditingId(c.id);
+    setEditRow({
+      org: c.org,
+      person: c.person,
+      title: c.title,
+      country: c.country,
+      type: c.type,
+      notes: c.notes,
+    });
+  };
+
+  // Add one new contact to the DB via the form.
+  const addContact = async () => {
+    if (!newContact.email) {
+      setDbNote("이메일을 입력하세요.");
+      return;
+    }
+    setBusy("addContact");
+    setDbNote("");
+    try {
+      const row = {
+        email: newContact.email.trim().toLowerCase(),
+        org: newContact.org.trim(),
+        person: newContact.person.trim(),
+        title: newContact.title.trim(),
+        country: newContact.country.trim(),
+        type: newContact.type.trim() || "CORPORATE_KR",
+        notes: newContact.notes.trim(),
+        sendable: "YES",
+      };
+      const { error } = await supabase.from("contacts").upsert([row], { onConflict: "email" });
+      if (error) throw error;
+      setDbNote("컨택 1건을 추가했습니다.");
+      setNewContact({ email: "", org: "", person: "", title: "", country: "", type: "CORPORATE_KR", notes: "" });
+      await loadContacts();
+    } catch (e) {
+      setDbNote("추가 실패: " + e.message);
+    }
+    setBusy("");
+  };
+
+  // Bulk add from pasted TSV/CSV (tab or comma separated).
+  const addContactsBulk = async () => {
+    if (!bulkPasteText.trim()) {
+      setDbNote("데이터를 붙여넣으세요.");
+      return;
+    }
+    const lines = bulkPasteText.trim().split("\n").filter(Boolean);
+    const rows = lines
+      .map((line) => {
+        // Try to detect delimiter and parse
+        const parts = line.includes("\t") ? line.split("\t") : line.split(",").map((x) => x.trim());
+        return {
+          email: (parts[0] || "").trim().toLowerCase(),
+          org: (parts[1] || "").trim(),
+          person: (parts[2] || "").trim(),
+          title: (parts[3] || "").trim(),
+          country: (parts[4] || "").trim(),
+          type: (parts[5] || "CORPORATE_KR").trim(),
+          notes: (parts.slice(6).join(" ") || "").trim(),
+          sendable: "YES",
+        };
+      })
+      .filter((x) => x.email);
+    if (!rows.length) {
+      setDbNote("유효한 이메일이 없습니다.");
+      return;
+    }
+    setBusy("addContactsBulk");
+    setDbNote("");
+    try {
+      const CHUNK = 100;
+      for (let i = 0; i < rows.length; i += CHUNK) {
+        const chunk = rows.slice(i, i + CHUNK);
+        const { error } = await supabase.from("contacts").upsert(chunk, { onConflict: "email" });
+        if (error) throw error;
+      }
+      setDbNote(`${rows.length}건을 추가/업데이트했습니다.`);
+      setBulkPasteText("");
+      await loadContacts();
+    } catch (e) {
+      setDbNote("일괄 추가 실패: " + e.message);
+    }
+    setBusy("");
+  };
+
+  const saveContact = async () => {
+    if (!editingId || !editRow) return;
+    setBusy("contact");
+    try {
+      const patch = { ...editRow, updated_at: new Date().toISOString() };
+      const { error } = await supabase
+        .from("contacts")
+        .update(patch)
+        .eq("id", editingId);
+      if (error) throw error;
+      setContacts((prev) =>
+        prev.map((c) => (c.id === editingId ? { ...c, ...editRow } : c))
+      );
+      setDbNote("컨택 정보를 수정했습니다.");
+      setEditingId(null);
+      setEditRow(null);
+    } catch (e) {
+      setDbNote("수정 실패: " + e.message);
+    }
+    setBusy("");
+  };
+
+  // Apply a type and/or country change to every selected row. Supabase caps
+  // the size of an `in` filter, so this goes out in chunks.
+  const applyBulk = async () => {
+    if (!selectedIds.length) return;
+    const patch = {};
+    if (bulkType) patch.type = bulkType;
+    if (bulkCountry) patch.country = bulkCountry;
+    if (!Object.keys(patch).length) {
+      setDbNote("변경할 항목(유형 또는 국가)을 먼저 선택하세요.");
+      return;
+    }
+    setBusy("contact");
+    try {
+      const CHUNK = 200;
+      for (let i = 0; i < selectedIds.length; i += CHUNK) {
+        const ids = selectedIds.slice(i, i + CHUNK);
+        const { error } = await supabase
+          .from("contacts")
+          .update({ ...patch, updated_at: new Date().toISOString() })
+          .in("id", ids);
+        if (error) throw error;
+      }
+      const idSet = new Set(selectedIds);
+      setContacts((prev) =>
+        prev.map((c) => (idSet.has(c.id) ? { ...c, ...patch } : c))
+      );
+      setDbNote(`${selectedIds.length}건을 일괄 수정했습니다.`);
+      setSelectedIds([]);
+      setBulkType("");
+      setBulkCountry("");
+    } catch (e) {
+      setDbNote("일괄 수정 실패: " + e.message);
+    }
+    setBusy("");
+  };
 
   // Pull every row from the `contacts` table (paginated — Supabase caps at 1000/req).
   const loadContacts = async () => {
@@ -826,23 +1066,7 @@ export default function App() {
         ? { kind: "pdf", data }
         : { kind: "image", media_type: f.type, data };
 
-      const prompt = `This is a startup's IR deck / pitch material. Extract a concise outreach profile.
-
-Return ONLY JSON, no prose, no markdown, and use no unescaped double quotes inside strings:
-{
- "name": "company name",
- "oneLiner": "one sentence, what the company does",
- "sector": "e.g. Logistics / Robotics",
- "tech": "the core technology / how it works, 1-2 sentences",
- "traction": "concrete proof: revenue, clients, users, funding stage. Numbers if present.",
- "ask": "what a partner or customer could offer them (PoC site, pilot, distribution, etc). If not stated, infer briefly.",
- "link": "website URL if present, else empty string"
-}
-Rules:
-- Use the deck's own facts. Do NOT invent numbers or clients.
-- If a field is genuinely not in the deck, use an empty string.
-- Keep each field short enough to fit a form input.
-- Write values in the deck's primary language (Korean deck -> Korean values).`;
+      const prompt = DECK_PROMPT;
 
       const out = await claudeWithDoc(source, prompt, 1500);
       const j = parseJSON(out);
@@ -864,7 +1088,15 @@ Rules:
   const filteredContacts = useMemo(() => {
     const q = contactQuery.trim().toLowerCase();
     return contacts.filter((c) => {
-      if (contactTypeFilter !== "ALL" && c.type !== contactTypeFilter) return false;
+      // VC_ALL is a virtual group, not a stored type: it spans VC and
+      // VC_CRYPTO_LIST. Many firms tagged as crypto investors are ordinary
+      // VCs, so treating them as one pool is what the matching step has
+      // always done — this just makes the contacts tab agree with it.
+      if (contactTypeFilter === "VC_ALL") {
+        if (!c.type.startsWith("VC")) return false;
+      } else if (contactTypeFilter !== "ALL" && c.type !== contactTypeFilter) {
+        return false;
+      }
       if (!q) return true;
       return (
         c.org.toLowerCase().includes(q) ||
@@ -898,16 +1130,32 @@ Rules:
     [pool, scores]
   );
 
-  const profileText = () =>
-    `Startup: ${startup.name}
-One-liner: ${startup.oneLiner}
-Sector: ${startup.sector}
-Technology: ${startup.tech}
-Traction / proof: ${startup.traction}
-What they want from a partner: ${startup.ask}
-Link: ${startup.link}`;
+  const profileTextFor = (t) =>
+    `Startup: ${t.name}\nOne-liner: ${t.oneLiner}\nSector: ${t.sector}\nTechnology: ${t.tech}\nTraction / proof: ${t.traction}\nWhat they want from a partner: ${t.ask}\nConcrete offer on the table: ${t.offer || "(none stated - do not invent one)"}\nLink: ${t.link}`;
+
+  const profileText = () => profileTextFor(startup);
+
+  // Primary profile first, then the extras. Half-filled slots are dropped so
+  // an empty row cannot poison a run.
+  const allStartups = useMemo(
+    () => [startup, ...extraStartups].filter((t) => t.name && t.oneLiner),
+    [startup, extraStartups]
+  );
 
   /* ------------------------------ matching ---------------------------- */
+  // Collapse per-startup scores into the single best-fit view that the match
+  // list, score bars and draft step already consume unchanged.
+  const bestOf = (m) => {
+    const out = {};
+    Object.entries(m).forEach(([cid, byStartup]) => {
+      const best = Object.entries(byStartup).sort(
+        (a, b) => b[1].score - a[1].score
+      )[0];
+      if (best) out[cid] = { ...best[1], startup: best[0] };
+    });
+    return out;
+  };
+
   const runMatch = async () => {
     if (!startup.name || !startup.oneLiner) {
       setErr("스타트업 이름과 한 줄 소개는 필수입니다.");
@@ -917,15 +1165,23 @@ Link: ${startup.link}`;
     setErr("");
     setBusy("match");
     setProgress(0);
-    const next = {};
+    const multi = {};      // contactId -> { startupName: {score, reason} }
     const BATCH = 20;      // contacts per API call
     const CONCURRENCY = 4; // real API key here, higher tier than the sandbox demo
+
+    // Each startup is screened in its own pass rather than describing all of
+    // them in a single prompt. Putting several profiles in one call means the
+    // (large) profile block gets re-sent with every batch of contacts, which
+    // costs more input than just running the loop — and a single-subject
+    // prompt produces a sharper, harsher score than one asked to rank three
+    // things at once.
+    const targets = allStartups.length ? allStartups : [startup];
 
     // build all batches up front
     const batches = [];
     for (let i = 0; i < pool.length; i += BATCH) batches.push(pool.slice(i, i + BATCH));
 
-    const scoreBatch = async (chunk) => {
+    const scoreBatch = async (chunk, target) => {
       const list = chunk
         .map(
           (c, j) =>
@@ -934,7 +1190,7 @@ Link: ${startup.link}`;
         .join("\n");
       const prompt = `You are screening outreach targets for a Korean startup entering Singapore.
 
-${profileText()}
+${profileTextFor(target)}
 
 Audience type: ${AUDIENCES[audience].label} — goal is ${AUDIENCES[audience].goal}.
 Judge fit on: ${AUDIENCES[audience].hint}
@@ -952,39 +1208,144 @@ Inside "reason" use only plain text — no double quotes, no line breaks, no col
       const out = await claude(prompt, 1600);
       parseJSON(out).forEach((r) => {
         const c = chunk[r.i];
-        if (c)
-          next[c.id] = {
-            score: Math.max(0, Math.min(100, Number(r.score) || 0)),
-            reason: String(r.reason || ""),
-          };
+        if (!c) return;
+        if (!multi[c.id]) multi[c.id] = {};
+        multi[c.id][target.name] = {
+          score: Math.max(0, Math.min(100, Number(r.score) || 0)),
+          reason: String(r.reason || ""),
+        };
       });
     };
 
     try {
       let done = 0;
-      // run batches in parallel waves of CONCURRENCY
-      for (let w = 0; w < batches.length; w += CONCURRENCY) {
-        const wave = batches.slice(w, w + CONCURRENCY);
-        await Promise.all(
-          wave.map((chunk) =>
-            scoreBatch(chunk).then(() => {
-              done += 1;
-              setScores({ ...next });
-              setProgress(Math.min(100, Math.round((done / batches.length) * 100)));
-            })
-          )
-        );
+      const totalUnits = batches.length * targets.length;
+      for (const target of targets) {
+        // run batches in parallel waves of CONCURRENCY
+        for (let w = 0; w < batches.length; w += CONCURRENCY) {
+          const wave = batches.slice(w, w + CONCURRENCY);
+          await Promise.all(
+            wave.map((chunk) =>
+              scoreBatch(chunk, target).then(() => {
+                done += 1;
+                setMultiScores({ ...multi });
+                setScores(bestOf(multi));
+                setProgress(Math.min(100, Math.round((done / totalUnits) * 100)));
+              })
+            )
+          );
+        }
       }
+      await saveKey(K.multi, multi);
+      setBundleOff({});
+      await saveKey(K.bundleOff, {});
       setTab("match");
+      if (targets.length > 1) checkCoherence(multi);
     } catch (e) {
       setErr("매칭 실패: " + e.message);
     }
     setBusy("");
   };
 
+  // For every contact whose qualifying startups (>=BUNDLE_MIN) number 2+,
+  // ask once whether that set reads as one coherent story for THIS
+  // recipient, or would look like an unrelated grab-bag. One batched call
+  // covers every candidate — this never blocks drafting, it only labels.
+  const checkCoherence = async (multi) => {
+    const candidates = Object.entries(multi)
+      .map(([cid, byName]) => ({
+        cid,
+        names: Object.entries(byName)
+          .filter(([, v]) => v.score >= BUNDLE_MIN)
+          .sort((a, b) => b[1].score - a[1].score)
+          .slice(0, MAX_BUNDLE)
+          .map(([n]) => n),
+      }))
+      .filter((x) => x.names.length >= 2);
+    if (!candidates.length) return;
+
+    const c = contacts.reduce((a, x) => ((a[x.id] = x), a), {});
+    const BATCH = 15;
+    const result = {};
+    for (let i = 0; i < candidates.length; i += BATCH) {
+      const chunk = candidates.slice(i, i + BATCH);
+      const list = chunk
+        .map((x, j) => {
+          const contact = c[x.cid];
+          const startupLines = x.names
+            .map((n) => {
+              const t = allStartups.find((s2) => s2.name === n);
+              return `${n}: ${t?.oneLiner || ""} (${t?.sector || ""})`;
+            })
+            .join(" | ");
+          return `${j}. recipient="${contact?.org || ""}" (${
+            contact?.notes || "no notes"
+          })\n   candidate startups: ${startupLines}`;
+        })
+        .join("\n");
+      const prompt = `For each recipient below, decide whether the listed startups make sense to introduce TOGETHER in one email, or whether they would read as an unrelated grab-bag to that specific recipient.
+
+Coherent means: a plausible shared angle for why this recipient would want all of them — same industry, adjacent parts of one workflow, same buying team, etc.
+Not coherent means: different, unrelated business lines with no honest shared angle, even if each one individually scored well.
+
+${list}
+
+Return ONLY a JSON array, no prose:
+[{"i":0,"ok":true,"reason":"max 12 words, name the shared angle or the mismatch"}]`;
+      const out = await claude(prompt, 1200);
+      try {
+        parseJSON(out).forEach((r) => {
+          const cand = chunk[r.i];
+          if (cand)
+            result[cand.cid] = { ok: !!r.ok, reason: String(r.reason || "") };
+        });
+      } catch {
+        // A failed batch just leaves those contacts unlabeled — they still
+        // default to "묶어서 1통" with no badge, never blocked.
+      }
+    }
+    setCoherence((prev) => {
+      const next = { ...prev, ...result };
+      saveKey(K.coherence, next);
+      return next;
+    });
+  };
+
+  // Which startups ride along in this contact's email: highest score first,
+  // only those clearing BUNDLE_MIN, capped at MAX_BUNDLE. Empty means "send
+  // the ordinary single-startup email".
+  // Include/exclude a single startup from one contact's bundle. This does
+  // NOT create separate emails for the excluded ones — it only removes them
+  // from this contact's single email. To send an excluded startup to this
+  // contact on its own, run it as its own campaign later; that keeps one
+  // company = one email thread, which is what reply tracking is keyed on.
+  const toggleStartupInBundle = async (contactId, startupName) => {
+    const cur = bundleOff[contactId] || [];
+    const nextList = cur.includes(startupName)
+      ? cur.filter((n) => n !== startupName)
+      : [...cur, startupName];
+    const next = { ...bundleOff, [contactId]: nextList };
+    setBundleOff(next);
+    await saveKey(K.bundleOff, next);
+  };
+
+  const bundleFor = useCallback(
+    (contactId) => {
+      if (allStartups.length < 2) return [];
+      const excluded = bundleOff[contactId] || [];
+      const byName = multiScores[contactId] || {};
+      return Object.entries(byName)
+        .filter(([nm, v]) => v.score >= BUNDLE_MIN && !excluded.includes(nm))
+        .sort((a, b) => b[1].score - a[1].score)
+        .slice(0, MAX_BUNDLE)
+        .map(([name]) => name);
+    },
+    [allStartups.length, bundleOff, multiScores]
+  );
+
   /* ------------------------------- drafts ----------------------------- */
   const fewShot = () => {
-    const recent = edits.slice(-3);
+    const recent = edits.slice(-5);
     if (!recent.length) return "";
     return (
       "\n\nTammy has edited past drafts. Learn from these before/after pairs:\n" +
@@ -998,7 +1359,81 @@ Inside "reason" use only plain text — no double quotes, no line breaks, no col
     );
   };
 
+  // A company that scores well for several startups gets ONE email covering
+  // them, not one email per startup. Beyond being less annoying for the
+  // recipient, this is also cheaper: it is a single drafting call instead of
+  // one per startup.
+  const draftBundle = async (c, names) => {
+    const picked = names
+      .map((n) => allStartups.find((t) => t.name === n))
+      .filter(Boolean);
+    const a = AUDIENCES[audience];
+    const langBlock =
+      lang === "KO"
+        ? `Write this email in KOREAN (한국어), in polished business Korean with proper 존댓말. Address the recipient by surname + title + 님, or "담당자님" if the title is unknown.`
+        : `Write this email in ENGLISH.`;
+
+    const blocks = picked
+      .map(
+        (t, k) =>
+          `--- STARTUP ${k + 1} ---\n${profileTextFor(t)}\nWhy this recipient: ${
+            multiScores[c.id]?.[t.name]?.reason || ""
+          }`
+      )
+      .join("\n\n");
+
+    const prompt = `${langBlock}
+
+SENDER
+${sender.name}, ${sender.title}, ${sender.org}
+Also: ${sender.secondOrg}
+Programme: ${sender.programmeLine}
+
+RECIPIENT
+${c.person || "(name unknown — use a neutral greeting)"} — ${c.title || "unknown title"}
+${c.org} (${c.country})
+Context: ${c.notes || "none"}
+
+You are introducing ${picked.length} startups to this ONE organisation in a single email.
+
+${blocks}
+
+STRUCTURE
+1. One line: who ${sender.name} is (the chamber role gives credibility — state it, don't sell it).
+2. One line on the ${sender.programme} programme.
+3. One sentence saying these ${picked.length} were selected specifically for this organisation — make the common thread explicit.
+4. One short block per startup: what it does, one concrete proof point (named customers or hard numbers if given), why it fits THIS organisation, and its offer if one is stated. Two to four sentences each. Keep the blocks parallel in shape so they scan quickly.
+5. Close with exactly ONE ask covering all of them, in the spirit of: "${a.cta}"
+6. Sign off as ${sender.name} and include ${sender.calendly} and ${sender.siteUrl}.
+
+IMPORTANT
+- If these startups do NOT share a credible common thread for this recipient, do not force one. Lead with the strongest fit, give it the full treatment, and mention the others in a single closing line as also potentially relevant.
+- Never pad a weak fit to match the length of a strong one. Uneven blocks are fine and more honest.
+- Do not invent customers, numbers, or offers that are not in the profiles above.
+
+TONE RULES (follow strictly)
+${tone.rules}
+- This is a multi-startup email, so the 160-word guidance above does not apply. Aim for 250-320 words and stay dense — no filler sentences.
+Never use these words: ${tone.banned}
+${fewShot()}
+
+OUTPUT FORMAT — follow exactly:
+- Plain text email body only. This is NOT markdown — it will be sent as-is in a real email client.
+- NEVER wrap words in asterisks, underscores, or # symbols for emphasis.
+- No JSON, no code fences, no commentary outside the two fields below.
+
+SUBJECT: <the subject line on one line>
+BODY:
+<the full email body, as many lines as needed>`;
+
+    const out = await claude(prompt, 2200);
+    const pr = parseDraft(out);
+    return { ...pr, orig: pr.body, edited: false, bundle: names };
+  };
+
   const draftFor = async (c) => {
+    const bundle = bundleFor(c.id);
+    if (bundle.length >= 2) return draftBundle(c, bundle);
     const a = AUDIENCES[audience];
     const langBlock =
       lang === "KO"
@@ -1050,7 +1485,10 @@ BODY:
 <the full email body, as many lines as needed>`;
 
     const out = await claude(prompt, 1400);
-    return { ...parseDraft(out), edited: false };
+    const p = parseDraft(out);
+    // Keep the untouched AI version. commitEdit() diffs against this, not
+    // against the live textarea value (see the bug note in commitEdit).
+    return { ...p, orig: p.body, edited: false };
   };
 
   const runDrafts = async () => {
@@ -1095,14 +1533,114 @@ BODY:
   };
 
   /* ---------------------------- learning loop -------------------------- */
+  // BUG (fixed): the textarea's onChange already writes the new text into
+  // drafts[id].body, so by the time this ran, d.body === newBody was ALWAYS
+  // true and the function returned before recording anything. Result: the
+  // edits log stayed empty forever and fewShot() always returned "", so no
+  // manual edit was ever learned. Diff against the original AI draft instead.
   const commitEdit = async (id, newBody) => {
     const d = drafts[id];
-    if (!d || d.body === newBody) return;
-    const rec = { before: d.body, after: newBody, at: Date.now() };
-    const nextEdits = [...edits, rec].slice(-8);
+    if (!d) return;
+    const base = d.orig ?? d.body;
+    if (base === newBody) {
+      setEditNote("변경된 내용이 없어 학습할 것이 없습니다.");
+      return;
+    }
+    const rec = { before: base, after: newBody, at: Date.now() };
+    const nextEdits = [...edits, rec].slice(-12);
     setEdits(nextEdits);
     await saveKey(K.edits, nextEdits);
-    setDrafts({ ...drafts, [id]: { ...d, body: newBody, edited: true } });
+    setDrafts({
+      ...drafts,
+      [id]: { ...d, body: newBody, orig: base, edited: true },
+    });
+    setEditNote(
+      `톤 학습 반영 (누적 ${nextEdits.length}건). 이미 만들어진 다른 초안에는 자동 적용되지 않습니다 — 아래 "학습 반영해 재생성"을 누르세요.`
+    );
+  };
+
+  // Re-draft every contact whose draft Tammy has NOT hand-edited, using the
+  // freshly learned tone. Hand-edited drafts are left alone on purpose —
+  // regenerating them would throw away the exact wording she just wrote.
+  const regenerateUnedited = async () => {
+    const targets = scored.filter((c) => drafts[c.id] && !drafts[c.id].edited);
+    if (!targets.length) {
+      setEditNote("재생성할 초안이 없습니다 (모두 수동 수정본이거나 초안이 없음).");
+      return;
+    }
+    setBusy("draft");
+    setProgress(0);
+    setErr("");
+    const next = { ...drafts };
+    const CONCURRENCY = 4;
+    try {
+      const cid = await getOrCreateCampaignId();
+      let done = 0;
+      for (let w = 0; w < targets.length; w += CONCURRENCY) {
+        const wave = targets.slice(w, w + CONCURRENCY);
+        await Promise.all(
+          wave.map((c) =>
+            draftFor(c).then((d) => {
+              next[c.id] = d;
+              done += 1;
+              setDrafts({ ...next });
+              setProgress(Math.round((done / targets.length) * 100));
+              persistSend(cid, c, {
+                subject: d.subject,
+                body: d.body,
+                status: sendStatus[c.id] || "draft",
+              });
+            })
+          )
+        );
+      }
+      setEditNote(
+        `${targets.length}건 재생성 완료 — 학습한 톤이 반영되었습니다. 수동 수정본은 그대로 보존했습니다.`
+      );
+    } catch (e) {
+      setErr("재생성 실패: " + e.message);
+    }
+    setBusy("");
+  };
+
+  const updateExtra = (k, patch) =>
+    setExtraStartups((prev) =>
+      prev.map((t, x) => (x === k ? { ...t, ...patch } : t))
+    );
+
+  // Same extraction as onDeck, but writes into an extra slot instead of the
+  // primary profile.
+  const onDeckExtra = async (e, k) => {
+    const f = e.target.files?.[0];
+    if (!f) return;
+    setErr("");
+    const isPdf = f.type === "application/pdf" || f.name.toLowerCase().endsWith(".pdf");
+    const isImg = f.type.startsWith("image/");
+    if (!isPdf && !isImg) {
+      setErr("PDF 또는 이미지 파일을 올려주세요.");
+      return;
+    }
+    setBusy(`extract${k}`);
+    try {
+      const data = await fileToBase64(f);
+      const source = isPdf
+        ? { kind: "pdf", data }
+        : { kind: "image", media_type: f.type, data };
+      const out = await claudeWithDoc(source, DECK_PROMPT, 1500);
+      const j = parseJSON(out);
+      updateExtra(k, {
+        name: j.name || "",
+        oneLiner: j.oneLiner || "",
+        sector: j.sector || "",
+        tech: j.tech || "",
+        traction: j.traction || "",
+        ask: j.ask || "",
+        link: j.link || "",
+      });
+    } catch (e2) {
+      setErr("IR 추출 실패: " + e2.message + " — 직접 입력하거나 다른 파일을 시도하세요.");
+    }
+    setBusy("");
   };
 
   const saveStartup = async () => {
@@ -1336,7 +1874,11 @@ BODY:
     }));
   };
 
-  const exportCsv = () => {
+  // The CSV contains names, titles and work email addresses of real people
+  // — personal data under Singapore's PDPA. So the file is now built on the
+  // server, which re-checks the signed-in account before returning anything.
+  // Hiding the button client-side alone would not have been a real control.
+  const exportCsv = async () => {
     const rows = scored
       .filter((c) => drafts[c.id])
       .map((c) => ({
@@ -1346,12 +1888,30 @@ BODY:
         fit: scores[c.id].score,
         subject: drafts[c.id].subject,
         body: drafts[c.id].body,
+        bundle: drafts[c.id].bundle ? drafts[c.id].bundle.join(" + ") : "",
       }));
-    const blob = new Blob([Papa.unparse(rows)], { type: "text/csv;charset=utf-8" });
-    const a = document.createElement("a");
-    a.href = URL.createObjectURL(blob);
-    a.download = `${startup.name || "campaign"}_drafts.csv`;
-    a.click();
+    if (!rows.length) return;
+    setErr("");
+    try {
+      const res = await fetch("/api/export", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ rows, filename: startup.name || "campaign" }),
+      });
+      if (!res.ok) {
+        const j = await res.json().catch(() => ({}));
+        setErr("⚠ 내보내기 거부됨: " + (j.error || res.status));
+        return;
+      }
+      const blob = await res.blob();
+      const a = document.createElement("a");
+      a.href = URL.createObjectURL(blob);
+      a.download = `${startup.name || "campaign"}_drafts.csv`;
+      a.click();
+      URL.revokeObjectURL(a.href);
+    } catch (e) {
+      setErr("내보내기 실패: " + e.message);
+    }
   };
 
   if (!ready) return null;
@@ -1674,7 +2234,116 @@ BODY:
                   {dbNote}
                 </div>
               )}
+            </Card>
 
+            {/* New contact form */}
+            <Card style={{ marginBottom: 16 }}>
+              <H sub="한 개씩 추가하거나 여러 개를 한 번에 붙여넣으세요">
+                새 컨택 추가
+              </H>
+
+              {/* Single contact form */}
+              <div style={{ marginBottom: 20, borderBottom: `1px solid ${C.line}`, paddingBottom: 16 }}>
+                <div style={{ fontSize: 12, color: C.mute, marginBottom: 12, fontWeight: 600 }}>
+                  한 개씩 추가
+                </div>
+                <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(200px, 1fr))", gap: 12, marginBottom: 12 }}>
+                  <Field
+                    label="이메일"
+                    value={newContact.email}
+                    onChange={(v) => setNewContact({ ...newContact, email: v })}
+                    ph="user@example.com"
+                  />
+                  <Field
+                    label="회사"
+                    value={newContact.org}
+                    onChange={(v) => setNewContact({ ...newContact, org: v })}
+                  />
+                  <Field
+                    label="담당자"
+                    value={newContact.person}
+                    onChange={(v) => setNewContact({ ...newContact, person: v })}
+                  />
+                  <Field
+                    label="직함"
+                    value={newContact.title}
+                    onChange={(v) => setNewContact({ ...newContact, title: v })}
+                  />
+                  <Field
+                    label="국가"
+                    value={newContact.country}
+                    onChange={(v) => setNewContact({ ...newContact, country: v })}
+                    ph="South Korea"
+                  />
+                  <label style={{ display: "block" }}>
+                    <div style={{ fontSize: 11, fontWeight: 600, letterSpacing: "0.06em", textTransform: "uppercase", color: C.mute, marginBottom: 5 }}>
+                      유형
+                    </div>
+                    <select
+                      value={newContact.type}
+                      onChange={(e) => setNewContact({ ...newContact, type: e.target.value })}
+                      style={{
+                        width: "100%",
+                        padding: "8px",
+                        border: `1px solid ${C.line}`,
+                        borderRadius: 4,
+                        background: C.surface,
+                        fontSize: 13,
+                      }}
+                    >
+                      {TYPE_OPTIONS.map((t) => (
+                        <option key={t} value={t}>
+                          {t}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                </div>
+                <Field
+                  label="메모"
+                  value={newContact.notes}
+                  onChange={(v) => setNewContact({ ...newContact, notes: v })}
+                  area
+                  rows={2}
+                />
+                <Btn onClick={addContact} disabled={!!busy || !newContact.email}>
+                  {busy === "addContact" ? "추가 중…" : "추가"}
+                </Btn>
+              </div>
+
+              {/* Bulk paste form */}
+              <div>
+                <div style={{ fontSize: 12, color: C.mute, marginBottom: 12, fontWeight: 600 }}>
+                  여러 개 일괄 추가 (탭/쉼표 구분)
+                </div>
+                <div style={{ fontSize: 11, color: C.mute, marginBottom: 10, lineHeight: 1.6 }}>
+                  형식: email[탭/쉼표]회사[탭/쉼표]담당자[탭/쉼표]직함[탭/쉼표]국가[탭/쉼표]유형[탭/쉼표]메모
+                  <br />
+                  예: user@example.com, Acme, John Doe, VP Sales, South Korea, CORPORATE_KR, 추가 메모
+                </div>
+                <textarea
+                  value={bulkPasteText}
+                  onChange={(e) => setBulkPasteText(e.target.value)}
+                  placeholder="한 줄에 한 컨택씩&#10;또는 Excel/Google Sheets에서 여러 행을 선택해 Ctrl+C 후 여기 Ctrl+V"
+                  style={{
+                    width: "100%",
+                    minHeight: 120,
+                    padding: 10,
+                    border: `1px solid ${C.line}`,
+                    borderRadius: 4,
+                    background: C.surface,
+                    fontSize: 13,
+                    fontFamily: "monospace",
+                    marginBottom: 12,
+                  }}
+                />
+                <Btn onClick={addContactsBulk} disabled={!!busy || !bulkPasteText.trim()}>
+                  {busy === "addContactsBulk" ? "추가 중…" : "일괄 추가"}
+                </Btn>
+              </div>
+            </Card>
+
+            <Card>
               {contacts.length === 0 && busy !== "loadContacts" && (
                 <div
                   style={{
@@ -1701,6 +2370,40 @@ BODY:
                     gap: 10,
                   }}
                 >
+                  {(() => {
+                    const vcCount = contacts.filter((c) =>
+                      c.type.startsWith("VC")
+                    ).length;
+                    if (!vcCount) return null;
+                    const on = contactTypeFilter === "VC_ALL";
+                    return (
+                      <button
+                        onClick={() => setContactTypeFilter(on ? "ALL" : "VC_ALL")}
+                        style={{
+                          textAlign: "left",
+                          cursor: "pointer",
+                          border: `1px solid ${on ? C.pine : C.pine}`,
+                          background: on ? C.pineSoft : C.surface,
+                          borderRadius: 6,
+                          padding: "10px 12px",
+                          transition: "all .12s",
+                        }}
+                      >
+                        <div
+                          style={{
+                            fontFamily: "'JetBrains Mono', monospace",
+                            fontSize: 18,
+                            color: C.pine,
+                          }}
+                        >
+                          {vcCount}
+                        </div>
+                        <div style={{ fontSize: 11, color: C.pine, fontWeight: 600 }}>
+                          VC 전체 (일반+크립토)
+                        </div>
+                      </button>
+                    );
+                  })()}
                   {Object.entries(
                     contacts.reduce((a, c) => {
                       a[c.type] = (a[c.type] || 0) + 1;
@@ -1783,19 +2486,130 @@ BODY:
                   </div>
                 </div>
 
+                {/* Bulk correction bar. The imported list has systematic
+                    errors — e.g. Korean funds carrying "Singapore" as their
+                    country — and fixing those one row at a time is not
+                    realistic across hundreds of records. */}
+                <div
+                  style={{
+                    display: "flex",
+                    alignItems: "center",
+                    gap: 8,
+                    flexWrap: "wrap",
+                    padding: "10px 16px",
+                    borderBottom: `1px solid ${C.line}`,
+                    background: selectedIds.length ? C.pineSoft : "#FAFBFC",
+                  }}
+                >
+                  <label
+                    style={{
+                      display: "flex",
+                      alignItems: "center",
+                      gap: 6,
+                      fontSize: 12,
+                      color: C.mute,
+                      cursor: "pointer",
+                    }}
+                  >
+                    <input
+                      type="checkbox"
+                      checked={
+                        filteredContacts.length > 0 &&
+                        selectedIds.length === filteredContacts.length
+                      }
+                      onChange={(e) =>
+                        setSelectedIds(
+                          e.target.checked ? filteredContacts.map((c) => c.id) : []
+                        )
+                      }
+                    />
+                    현재 필터 전체 선택
+                  </label>
+
+                  <span style={{ fontSize: 12, color: selectedIds.length ? C.pine : C.mute }}>
+                    {selectedIds.length
+                      ? `${selectedIds.length.toLocaleString()}건 선택됨`
+                      : "선택 없음"}
+                  </span>
+
+                  <select
+                    value={bulkType}
+                    onChange={(e) => setBulkType(e.target.value)}
+                    style={{
+                      padding: "6px 8px",
+                      border: `1px solid ${C.line}`,
+                      borderRadius: 4,
+                      fontSize: 12,
+                      background: C.surface,
+                    }}
+                  >
+                    <option value="">유형 변경 안 함</option>
+                    {TYPE_OPTIONS.map((t) => (
+                      <option key={t} value={t}>
+                        {t}
+                      </option>
+                    ))}
+                  </select>
+
+                  <input
+                    value={bulkCountry}
+                    onChange={(e) => setBulkCountry(e.target.value)}
+                    placeholder="국가 변경 (예: South Korea)"
+                    style={{
+                      padding: "6px 8px",
+                      border: `1px solid ${C.line}`,
+                      borderRadius: 4,
+                      fontSize: 12,
+                      width: 200,
+                      background: C.surface,
+                    }}
+                  />
+
+                  <Btn
+                    small
+                    onClick={applyBulk}
+                    disabled={!selectedIds.length || !!busy}
+                  >
+                    {busy === "contact" ? "적용 중…" : "선택 항목에 적용"}
+                  </Btn>
+                  {selectedIds.length > 0 && (
+                    <Btn small kind="ghost" onClick={() => setSelectedIds([])}>
+                      선택 해제
+                    </Btn>
+                  )}
+                </div>
+
                 <div style={{ maxHeight: 460, overflowY: "auto" }}>
                   {filteredContacts.slice(0, 300).map((c) => (
                     <div
                       key={c.id}
                       style={{
+                        borderBottom: `1px solid ${C.line}`,
+                        fontSize: 12.5,
+                        background:
+                          editingId === c.id ? "#FAFBFC" : "transparent",
+                      }}
+                    >
+                     <div
+                      style={{
                         display: "flex",
                         alignItems: "center",
                         gap: 12,
                         padding: "9px 16px",
-                        borderBottom: `1px solid ${C.line}`,
-                        fontSize: 12.5,
                       }}
-                    >
+                     >
+                      <input
+                        type="checkbox"
+                        checked={selectedIds.includes(c.id)}
+                        onChange={(e) =>
+                          setSelectedIds((prev) =>
+                            e.target.checked
+                              ? [...prev, c.id]
+                              : prev.filter((x) => x !== c.id)
+                          )
+                        }
+                        style={{ flexShrink: 0, cursor: "pointer" }}
+                      />
                       <div
                         style={{
                           width: 92,
@@ -1845,6 +2659,122 @@ BODY:
                       <div style={{ width: 70, flexShrink: 0, color: C.mute, fontSize: 11 }}>
                         {c.country}
                       </div>
+                      <button
+                        onClick={() =>
+                          editingId === c.id
+                            ? (setEditingId(null), setEditRow(null))
+                            : startEditContact(c)
+                        }
+                        style={{
+                          flexShrink: 0,
+                          border: `1px solid ${C.line}`,
+                          background: C.surface,
+                          borderRadius: 4,
+                          padding: "4px 8px",
+                          fontSize: 11,
+                          color: C.mute,
+                          cursor: "pointer",
+                        }}
+                      >
+                        {editingId === c.id ? "닫기" : "수정"}
+                      </button>
+                     </div>
+
+                      {editingId === c.id && editRow && (
+                        <div style={{ padding: "4px 16px 14px" }}>
+                          <div
+                            style={{
+                              display: "grid",
+                              gridTemplateColumns: "repeat(auto-fit,minmax(180px,1fr))",
+                              gap: 12,
+                            }}
+                          >
+                            <Field
+                              label="회사"
+                              value={editRow.org}
+                              onChange={(v) => setEditRow({ ...editRow, org: v })}
+                            />
+                            <Field
+                              label="담당자"
+                              value={editRow.person}
+                              onChange={(v) => setEditRow({ ...editRow, person: v })}
+                            />
+                            <Field
+                              label="직함"
+                              value={editRow.title}
+                              onChange={(v) => setEditRow({ ...editRow, title: v })}
+                            />
+                            <Field
+                              label="국가"
+                              value={editRow.country}
+                              onChange={(v) => setEditRow({ ...editRow, country: v })}
+                            />
+                            <label style={{ display: "block", marginBottom: 14 }}>
+                              <div
+                                style={{
+                                  fontFamily: "Inter, sans-serif",
+                                  fontSize: 11,
+                                  fontWeight: 600,
+                                  letterSpacing: "0.06em",
+                                  textTransform: "uppercase",
+                                  color: C.mute,
+                                  marginBottom: 5,
+                                }}
+                              >
+                                유형
+                              </div>
+                              <select
+                                value={editRow.type}
+                                onChange={(e) =>
+                                  setEditRow({ ...editRow, type: e.target.value })
+                                }
+                                style={inputStyle(false)}
+                              >
+                                {TYPE_OPTIONS.map((t) => (
+                                  <option key={t} value={t}>
+                                    {t}
+                                  </option>
+                                ))}
+                                {!TYPE_OPTIONS.includes(editRow.type) &&
+                                  editRow.type && (
+                                    <option value={editRow.type}>{editRow.type}</option>
+                                  )}
+                              </select>
+                            </label>
+                          </div>
+                          <Field
+                            label="메모 (매칭 근거에 사용됩니다)"
+                            value={editRow.notes}
+                            area
+                            rows={2}
+                            onChange={(v) => setEditRow({ ...editRow, notes: v })}
+                          />
+                          <div style={{ display: "flex", gap: 8 }}>
+                            <Btn small onClick={saveContact} disabled={!!busy}>
+                              {busy === "contact" ? "저장 중…" : "저장"}
+                            </Btn>
+                            <Btn
+                              small
+                              kind="ghost"
+                              onClick={() => {
+                                setEditingId(null);
+                                setEditRow(null);
+                              }}
+                            >
+                              취소
+                            </Btn>
+                            <div
+                              style={{
+                                alignSelf: "center",
+                                fontSize: 11,
+                                color: C.mute,
+                              }}
+                            >
+                              {c.email}
+                            </div>
+                          </div>
+                        </div>
+                      )}
                     </div>
                   ))}
                   {filteredContacts.length > 300 && (
@@ -1988,6 +2918,12 @@ BODY:
                 ph="싱가포르 내 3개월 배송 PoC 사이트, 규제 가이드"
               />
               <Field
+                label="구체적 오퍼 (선택)"
+                value={startup.offer}
+                onChange={(v) => setStartup({ ...startup, offer: v })}
+                ph="코참 회원사 대상 4개월 무료 시범 사용"
+              />
+              <Field
                 label="링크"
                 value={startup.link}
                 onChange={(v) => setStartup({ ...startup, link: v })}
@@ -1997,6 +2933,127 @@ BODY:
                 <Btn onClick={saveStartup} kind="ghost">
                   프로필 저장
                 </Btn>
+              </div>
+
+              {/* Extra startups. Adding none keeps the app behaving exactly as
+                  it did before — this whole section is opt-in. */}
+              <div style={{ marginTop: 22, borderTop: `1px solid ${C.line}`, paddingTop: 18 }}>
+                <H sub={`한 회사가 여러 스타트업에 잘 맞으면 메일을 한 통으로 묶어 보냅니다. 최대 ${MAX_BUNDLE}개.`}>
+                  같이 소개할 스타트업 ({extraStartups.length + 1}/{MAX_BUNDLE})
+                </H>
+
+                {extraStartups.map((t, k) => (
+                  <div
+                    key={k}
+                    style={{
+                      border: `1px solid ${C.line}`,
+                      borderRadius: 6,
+                      padding: 14,
+                      marginBottom: 12,
+                    }}
+                  >
+                    <div
+                      style={{
+                        display: "flex",
+                        justifyContent: "space-between",
+                        alignItems: "center",
+                        marginBottom: 10,
+                      }}
+                    >
+                      <div style={{ fontSize: 12, fontWeight: 600, color: C.mute }}>
+                        스타트업 {k + 2}
+                      </div>
+                      <div style={{ display: "flex", gap: 6 }}>
+                        <label>
+                          <span
+                            style={{
+                              display: "inline-block",
+                              padding: "5px 10px",
+                              border: `1px solid ${C.line}`,
+                              borderRadius: 4,
+                              fontSize: 11,
+                              cursor: busy ? "default" : "pointer",
+                              color: C.mute,
+                            }}
+                          >
+                            {busy === `extract${k}` ? "읽는 중…" : "IR 자료로 자동 채우기"}
+                          </span>
+                          <input
+                            type="file"
+                            accept=".pdf,image/*"
+                            onChange={(e) => onDeckExtra(e, k)}
+                            disabled={!!busy}
+                            style={{ display: "none" }}
+                          />
+                        </label>
+                        <Btn
+                          small
+                          kind="ghost"
+                          onClick={() =>
+                            setExtraStartups(extraStartups.filter((_, x) => x !== k))
+                          }
+                        >
+                          삭제
+                        </Btn>
+                      </div>
+                    </div>
+                    <Field
+                      label="이름"
+                      value={t.name}
+                      onChange={(v) => updateExtra(k, { name: v })}
+                    />
+                    <Field
+                      label="한 줄 소개"
+                      value={t.oneLiner}
+                      onChange={(v) => updateExtra(k, { oneLiner: v })}
+                      area
+                      rows={2}
+                    />
+                    <Field
+                      label="트랙션 / 증거"
+                      value={t.traction}
+                      onChange={(v) => updateExtra(k, { traction: v })}
+                      area
+                      rows={2}
+                      ph="named 고객사, 계약 갱신율, 배포 수량 등"
+                    />
+                    <Field
+                      label="구체적 오퍼 (선택)"
+                      value={t.offer}
+                      onChange={(v) => updateExtra(k, { offer: v })}
+                      ph="코참 회원사 대상 4개월 무료 시범 사용"
+                    />
+                    <Field
+                      label="링크"
+                      value={t.link}
+                      onChange={(v) => updateExtra(k, { link: v })}
+                      ph="https://..."
+                    />
+                  </div>
+                ))}
+
+                {extraStartups.length + 1 < MAX_BUNDLE ? (
+                  <Btn
+                    kind="ghost"
+                    small
+                    onClick={() => setExtraStartups([...extraStartups, { ...EMPTY_STARTUP }])}
+                  >
+                    + 스타트업 추가
+                  </Btn>
+                ) : (
+                  <div style={{ fontSize: 11, color: C.mute }}>
+                    한 통에 {MAX_BUNDLE}개가 상한입니다. 더 넣으면 메일이 제안서가 아니라
+                    카탈로그처럼 읽힙니다.
+                  </div>
+                )}
+
+                {extraStartups.length > 0 && (
+                  <div style={{ fontSize: 11, color: C.mute, marginTop: 10, lineHeight: 1.7 }}>
+                    매칭은 스타트업별로 따로 채점하고, {BUNDLE_MIN}점 이상을 받은 스타트업이
+                    2개 이상인 회사만 묶인 메일을 받습니다. 나머지는 지금과 똑같이 한 곳씩
+                    나갑니다. 매칭 시간은 스타트업 수에 비례해 늘어납니다.
+                  </div>
+                )}
               </div>
             </Card>
 
@@ -2113,7 +3170,13 @@ BODY:
                 disabled={!pool.length || !!busy}
               >
                 {pool.length}명 매칭 스코어링
+                {allStartups.length > 1 && ` · 스타트업 ${allStartups.length}개`}
               </Btn>
+              {allStartups.length > 1 && (
+                <div style={{ fontSize: 11, color: C.mute, marginTop: 8 }}>
+                  스타트업마다 따로 채점합니다 — 시간이 스타트업 수만큼 늘어납니다.
+                </div>
+              )}
               {!pool.length && (
                 <div style={{ fontSize: 11, color: C.mute, marginTop: 8 }}>
                   이 유형의 컨택이 없습니다. CSV를 먼저 올리세요.
@@ -2216,6 +3279,105 @@ BODY:
                     <div style={{ fontSize: 12, color: C.mute, marginTop: 2 }}>
                       {scores[c.id].reason}
                     </div>
+                    {/* Which startups qualify for this one company. Each chip
+                        is a toggle: click to drop that startup from THIS
+                        contact's email without affecting anyone else's. The
+                        coherence badge flags qualifying sets that scored well
+                        individually but may not read as one story. */}
+                    {allStartups.length > 1 && multiScores[c.id] && (
+                      <div
+                        style={{
+                          display: "flex",
+                          gap: 6,
+                          flexWrap: "wrap",
+                          alignItems: "center",
+                          marginTop: 5,
+                        }}
+                      >
+                        {Object.entries(multiScores[c.id])
+                          .sort((a, b) => b[1].score - a[1].score)
+                          .map(([nm, v]) => {
+                            const qualifies = v.score >= BUNDLE_MIN;
+                            const excluded = (bundleOff[c.id] || []).includes(nm);
+                            const inBundle = qualifies && !excluded;
+                            return (
+                              <button
+                                key={nm}
+                                onClick={() =>
+                                  qualifies && toggleStartupInBundle(c.id, nm)
+                                }
+                                title={
+                                  qualifies
+                                    ? v.reason + " — 클릭하면 이 회사 메일에서 제외/포함"
+                                    : v.reason
+                                }
+                                disabled={!qualifies}
+                                style={{
+                                  fontSize: 10.5,
+                                  padding: "2px 7px",
+                                  borderRadius: 3,
+                                  border: `1px solid ${inBundle ? C.pine : C.line}`,
+                                  background: inBundle ? C.pineSoft : "transparent",
+                                  color: inBundle ? C.pine : C.mute,
+                                  fontWeight: inBundle ? 600 : 400,
+                                  textDecoration:
+                                    qualifies && excluded ? "line-through" : "none",
+                                  cursor: qualifies ? "pointer" : "default",
+                                  opacity: qualifies ? 1 : 0.6,
+                                }}
+                              >
+                                {nm} {v.score}
+                              </button>
+                            );
+                          })}
+                        {bundleFor(c.id).length >= 2 &&
+                          (coherence[c.id] ? (
+                            coherence[c.id].ok ? (
+                              <span
+                                title={coherence[c.id].reason}
+                                style={{
+                                  fontSize: 10.5,
+                                  padding: "2px 7px",
+                                  borderRadius: 3,
+                                  border: `1px solid ${C.pine}`,
+                                  background: C.pine,
+                                  color: "#fff",
+                                }}
+                              >
+                                ✓ 묶음 자연스러움 · 1통
+                              </span>
+                            ) : (
+                              <button
+                                onClick={() => {
+                                  const top = Object.entries(multiScores[c.id])
+                                    .sort((a, b) => b[1].score - a[1].score)[0]?.[0];
+                                  const rest = bundleFor(c.id).filter((n) => n !== top);
+                                  rest.forEach((n) => toggleStartupInBundle(c.id, n));
+                                }}
+                                title={
+                                  coherence[c.id].reason + " — 클릭하면 최고점 1개만 남기고 나머지 제외"
+                                }
+                                style={{
+                                  fontSize: 10.5,
+                                  padding: "2px 7px",
+                                  borderRadius: 3,
+                                  border: "1px solid #B3541E",
+                                  background: "#FBEAD9",
+                                  color: "#B3541E",
+                                  fontWeight: 600,
+                                  cursor: "pointer",
+                                }}
+                              >
+                                ⚠ 분리 권장 — {coherence[c.id].reason} · 클릭해 분리
+                              </button>
+                            )
+                          ) : (
+                            <span style={{ fontSize: 10.5, color: C.mute }}>
+                              묶어서 1통
+                            </span>
+                          ))}
+                      </div>
+                    )}
                   </div>
                   <div
                     style={{
@@ -2334,8 +3496,24 @@ BODY:
                     전체 실제 발송
                   </Btn>
                 )}
-                <Btn kind="ghost" onClick={exportCsv} disabled={!Object.keys(drafts).length}>
-                  CSV 내보내기
+                <Btn
+                  kind="ghost"
+                  onClick={regenerateUnedited}
+                  disabled={!!busy || !Object.keys(drafts).length || !edits.length}
+                >
+                  학습 반영해 재생성 ({edits.length}건 학습됨)
+                </Btn>
+                <Btn
+                  kind="ghost"
+                  onClick={exportCsv}
+                  disabled={!Object.keys(drafts).length || !account.staff}
+                  title={
+                    account.staff
+                      ? ""
+                      : "개인정보(PDPA) 보호를 위해 Lodestart 계정으로 로그인한 경우에만 내보낼 수 있습니다."
+                  }
+                >
+                  CSV 내보내기{account.staff ? "" : " 🔒"}
                 </Btn>
               </div>
             </div>
@@ -2353,6 +3531,36 @@ BODY:
                 }}
               >
                 {pushMsg}
+              </div>
+            )}
+            {editNote && (
+              <div
+                style={{
+                  margin: "0 0 12px",
+                  padding: "10px 14px",
+                  borderRadius: 5,
+                  background: C.pineSoft,
+                  color: C.pine,
+                  fontSize: 12,
+                  fontFamily: "Inter, sans-serif",
+                  display: "flex",
+                  gap: 10,
+                  alignItems: "flex-start",
+                }}
+              >
+                <div style={{ flex: 1 }}>{editNote}</div>
+                <button
+                  onClick={() => setEditNote("")}
+                  style={{
+                    border: "none",
+                    background: "none",
+                    cursor: "pointer",
+                    color: C.pine,
+                    fontSize: 12,
+                  }}
+                >
+                  닫기
+                </button>
               </div>
             )}
             {scored
@@ -2374,7 +3582,25 @@ BODY:
                     >
                       <ScoreBar score={scores[c.id].score} />
                       <div style={{ flex: 1, minWidth: 0 }}>
-                        <div style={{ fontSize: 13, fontWeight: 600 }}>{c.org}</div>
+                        <div style={{ fontSize: 13, fontWeight: 600 }}>
+                          {c.org}
+                          {d.bundle && d.bundle.length >= 2 && (
+                            <span
+                              style={{
+                                marginLeft: 8,
+                                fontSize: 10,
+                                fontWeight: 700,
+                                color: C.pine,
+                                background: C.pineSoft,
+                                borderRadius: 3,
+                                padding: "2px 6px",
+                              }}
+                              title={d.bundle.join(" + ")}
+                            >
+                              🔗 {d.bundle.length}개 묶음
+                            </span>
+                          )}
+                        </div>
                         <div
                           style={{
                             fontFamily: "'JetBrains Mono', monospace",
