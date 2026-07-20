@@ -2949,12 +2949,34 @@ BODY:
                       rows={2}
                     />
                     <Field
+                      label="섹터"
+                      value={t.sector}
+                      onChange={(v) => updateExtra(k, { sector: v })}
+                      ph="Logistics / Robotics"
+                    />
+                    <Field
+                      label="기술"
+                      value={t.tech}
+                      onChange={(v) => updateExtra(k, { tech: v })}
+                      area
+                      rows={2}
+                      ph="LiDAR 없이 카메라 기반 SLAM. 하드웨어 원가 1/5."
+                    />
+                    <Field
                       label="트랙션 / 증거"
                       value={t.traction}
                       onChange={(v) => updateExtra(k, { traction: v })}
                       area
                       rows={2}
                       ph="named 고객사, 계약 갱신율, 배포 수량 등"
+                    />
+                    <Field
+                      label="파트너에게 원하는 것"
+                      value={t.ask}
+                      onChange={(v) => updateExtra(k, { ask: v })}
+                      area
+                      rows={2}
+                      ph="싱가포르 내 3개월 PoC 사이트, 규제 가이드"
                     />
                     <Field
                       label="구체적 오퍼 (선택)"
