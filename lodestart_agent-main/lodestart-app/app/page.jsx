@@ -85,13 +85,11 @@ const DEFAULT_SENDER = {
   signoff: "Best regards,",
 };
 
-// Types the contacts table actually uses. VC and VC_CRYPTO_LIST are kept as
-// separate stored values on purpose — the matching pool already treats them
-// as one group, and keeping the tag means a crypto-only view is still
-// possible later. Merging them destructively would not be reversible.
+// Types the contacts table uses. VC_CRYPTO_LIST was merged into VC (see
+// migration_merge_vc.sql) — most firms tagged as crypto investors were
+// ordinary VCs and splitting them meant reading every count twice.
 const TYPE_OPTIONS = [
   "VC",
-  "VC_CRYPTO_LIST",
   "CORPORATE_KR",
   "ACCELERATOR",
   "INSTITUTION",
@@ -206,6 +204,34 @@ async function claude(prompt, maxTokens = 1000, tries = 0) {
   if (!res.ok) throw new Error(`API ${res.status}`);
   const data = await res.json();
   reportUsage(data.usage);
+  return data.content
+    .filter((b) => b.type === "text")
+    .map((b) => b.text)
+    .join("\n");
+}
+
+// Same as claude(), but lets the model look things up on the web. Used only
+// by the note-enrichment job — matching and drafting stay search-free.
+async function claudeSearch(prompt, maxTokens = 2000, maxSearches = 4, tries = 0) {
+  const res = await fetch("/api/claude", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      model: "claude-sonnet-4-6",
+      max_tokens: maxTokens,
+      web_search: true,
+      max_searches: maxSearches,
+      messages: [{ role: "user", content: prompt }],
+    }),
+  });
+  if ((res.status === 429 || res.status === 529) && tries < 5) {
+    await new Promise((r) => setTimeout(r, 2000 * Math.pow(2, tries)));
+    return claudeSearch(prompt, maxTokens, maxSearches, tries + 1);
+  }
+  if (!res.ok) throw new Error(`API ${res.status}`);
+  const data = await res.json();
+  reportUsage(data.usage);
+  // Search results arrive as extra blocks; only the model's own text matters.
   return data.content
     .filter((b) => b.type === "text")
     .map((b) => b.text)
@@ -788,19 +814,16 @@ export default function App() {
   /* ---------------------------- csv ingest ---------------------------- */
   const [contactQuery, setContactQuery] = useState("");
   const [contactTypeFilter, setContactTypeFilter] = useState("ALL");
+  const [showAddContact, setShowAddContact] = useState(false);
   const [newContact, setNewContact] = useState({ email: "", org: "", person: "", title: "", country: "", type: "CORPORATE_KR", notes: "" });
-  const [bulkPasteText, setBulkPasteText] = useState("");
   const [dbNote, setDbNote] = useState("");
 
   // Inline contact correction. The imported list has real mistakes in it
-  // (Korean funds tagged as Singapore, crypto/traditional VC mixed up), and
-  // re-uploading a hand-edited CSV to fix them is error-prone. These let the
-  // record be corrected in place, one row or many at once.
+  // (Korean funds tagged as Singapore, crypto/traditional VC mixed up). For a
+  // handful of rows this is quicker than editing a CSV; for a systematic fix
+  // across hundreds, re-uploading a corrected CSV still upserts by email.
   const [editingId, setEditingId] = useState(null);
   const [editRow, setEditRow] = useState(null);
-  const [selectedIds, setSelectedIds] = useState([]);
-  const [bulkType, setBulkType] = useState("");
-  const [bulkCountry, setBulkCountry] = useState("");
 
   const startEditContact = (c) => {
     setEditingId(c.id);
@@ -844,51 +867,6 @@ export default function App() {
     setBusy("");
   };
 
-  // Bulk add from pasted TSV/CSV (tab or comma separated).
-  const addContactsBulk = async () => {
-    if (!bulkPasteText.trim()) {
-      setDbNote("데이터를 붙여넣으세요.");
-      return;
-    }
-    const lines = bulkPasteText.trim().split("\n").filter(Boolean);
-    const rows = lines
-      .map((line) => {
-        // Try to detect delimiter and parse
-        const parts = line.includes("\t") ? line.split("\t") : line.split(",").map((x) => x.trim());
-        return {
-          email: (parts[0] || "").trim().toLowerCase(),
-          org: (parts[1] || "").trim(),
-          person: (parts[2] || "").trim(),
-          title: (parts[3] || "").trim(),
-          country: (parts[4] || "").trim(),
-          type: (parts[5] || "CORPORATE_KR").trim(),
-          notes: (parts.slice(6).join(" ") || "").trim(),
-          sendable: "YES",
-        };
-      })
-      .filter((x) => x.email);
-    if (!rows.length) {
-      setDbNote("유효한 이메일이 없습니다.");
-      return;
-    }
-    setBusy("addContactsBulk");
-    setDbNote("");
-    try {
-      const CHUNK = 100;
-      for (let i = 0; i < rows.length; i += CHUNK) {
-        const chunk = rows.slice(i, i + CHUNK);
-        const { error } = await supabase.from("contacts").upsert(chunk, { onConflict: "email" });
-        if (error) throw error;
-      }
-      setDbNote(`${rows.length}건을 추가/업데이트했습니다.`);
-      setBulkPasteText("");
-      await loadContacts();
-    } catch (e) {
-      setDbNote("일괄 추가 실패: " + e.message);
-    }
-    setBusy("");
-  };
-
   const saveContact = async () => {
     if (!editingId || !editRow) return;
     setBusy("contact");
@@ -911,43 +889,116 @@ export default function App() {
     setBusy("");
   };
 
-  // Apply a type and/or country change to every selected row. Supabase caps
-  // the size of an `in` filter, so this goes out in chunks.
-  const applyBulk = async () => {
-    if (!selectedIds.length) return;
-    const patch = {};
-    if (bulkType) patch.type = bulkType;
-    if (bulkCountry) patch.country = bulkCountry;
-    if (!Object.keys(patch).length) {
-      setDbNote("변경할 항목(유형 또는 국가)을 먼저 선택하세요.");
+  // Fill in missing company descriptions by actually looking the companies up.
+  //
+  // Why this exists: matching sends the model org / title / country / notes and
+  // nothing else — there is no web access at match time. For well-known names
+  // the model's own knowledge carries it, but most of the VC list is small
+  // firms it has never heard of, and with an empty note the score is close to
+  // guesswork. Researching once and storing the result keeps matching fast
+  // while giving it something real to read.
+  //
+  // Only ever fills EMPTY notes — anything already written (by Tammy or by a
+  // previous run) is left alone, so this is safe to re-run and resumes where
+  // it stopped.
+  const enrichNotes = async () => {
+    const targets = filteredContacts.filter((c) => !c.notes && c.org);
+    if (!targets.length) {
+      setDbNote("현재 목록에는 설명이 비어 있는 컨택이 없습니다.");
       return;
     }
-    setBusy("contact");
-    try {
-      const CHUNK = 200;
-      for (let i = 0; i < selectedIds.length; i += CHUNK) {
-        const ids = selectedIds.slice(i, i + CHUNK);
+    setBusy("enrich");
+    setDbNote("");
+    setProgress(0);
+
+    const BATCH = 8;      // companies per call
+    const CONCURRENCY = 3;
+    const batches = [];
+    for (let i = 0; i < targets.length; i += BATCH)
+      batches.push(targets.slice(i, i + BATCH));
+
+    let done = 0;
+    let filled = 0;
+    let skipped = 0;
+
+    const runBatch = async (chunk) => {
+      // Only the company name and country go out — no person names, no email
+      // addresses. There is no reason to put personal data into a search query.
+      const list = chunk
+        .map((c, j) => `${j}. ${c.org}${c.country ? ` (${c.country})` : ""}`)
+        .join("\n");
+      const prompt = `Look up each company below and write a one-line factual description of what it does.
+
+${list}
+
+For each: what the company actually does, its sector, and its rough size or notability if that is quickly established. This text will be used to judge whether a B2B technology pitch is relevant to them, so lead with the business activity, not with marketing language.
+
+Rules:
+- Maximum 25 words each. Plain text, no quotes, no colons, no line breaks.
+- If you cannot find reliable information about a company, return an empty string for it. Do NOT guess from the name, and do NOT describe a different company with a similar name.
+- Do not include contact details or the names of individuals.
+
+Return ONLY a JSON array, no prose, no markdown:
+[{"i":0,"desc":"..."}]`;
+
+      let parsed = [];
+      try {
+        parsed = parseJSON(await claudeSearch(prompt, 2000, 4));
+      } catch {
+        return; // a failed batch just stays empty and can be retried later
+      }
+
+      const updates = [];
+      parsed.forEach((r) => {
+        const c = chunk[r.i];
+        const desc = String(r.desc || "").trim();
+        if (!c) return;
+        if (!desc) {
+          skipped += 1;
+          return;
+        }
+        updates.push({ id: c.id, notes: desc });
+      });
+      if (!updates.length) return;
+
+      for (const u of updates) {
         const { error } = await supabase
           .from("contacts")
-          .update({ ...patch, updated_at: new Date().toISOString() })
-          .in("id", ids);
-        if (error) throw error;
+          .update({ notes: u.notes, updated_at: new Date().toISOString() })
+          .eq("id", u.id);
+        if (!error) filled += 1;
       }
-      const idSet = new Set(selectedIds);
+      const byId = updates.reduce((a, u) => ((a[u.id] = u.notes), a), {});
       setContacts((prev) =>
-        prev.map((c) => (idSet.has(c.id) ? { ...c, ...patch } : c))
+        prev.map((c) => (byId[c.id] ? { ...c, notes: byId[c.id] } : c))
       );
-      setDbNote(`${selectedIds.length}건을 일괄 수정했습니다.`);
-      setSelectedIds([]);
-      setBulkType("");
-      setBulkCountry("");
+    };
+
+    try {
+      for (let w = 0; w < batches.length; w += CONCURRENCY) {
+        const wave = batches.slice(w, w + CONCURRENCY);
+        await Promise.all(
+          wave.map((chunk) =>
+            runBatch(chunk).then(() => {
+              done += 1;
+              setProgress(Math.round((done / batches.length) * 100));
+            })
+          )
+        );
+      }
+      setDbNote(
+        `회사 설명 ${filled}건을 채웠습니다.` +
+          (skipped
+            ? ` ${skipped}건은 확실한 정보를 찾지 못해 비워뒀습니다 — 추측으로 채우지 않았습니다.`
+            : "")
+      );
     } catch (e) {
-      setDbNote("일괄 수정 실패: " + e.message);
+      setDbNote("자동 채우기 중단: " + e.message + " — 이미 채워진 건은 저장되어 있습니다.");
     }
     setBusy("");
+    setProgress(0);
   };
 
-  // Pull every row from the `contacts` table (paginated — Supabase caps at 1000/req).
   const loadContacts = async () => {
     setBusy("loadContacts");
     setDbNote("");
@@ -1016,7 +1067,12 @@ export default function App() {
             person: (x.person || "").trim(),
             title: (x.title || "").trim(),
             country: (x.country || "").trim(),
-            type: (x.type || "").trim(),
+            // Legacy exports still carry the old split — fold it back in on
+            // the way in so an old CSV can't undo the merge.
+            type:
+              (x.type || "").trim() === "VC_CRYPTO_LIST"
+                ? "VC"
+                : (x.type || "").trim(),
             notes: (x.notes || "").trim(),
             sendable: (x.sendable || "YES").trim() || "YES",
           }))
@@ -1088,15 +1144,7 @@ export default function App() {
   const filteredContacts = useMemo(() => {
     const q = contactQuery.trim().toLowerCase();
     return contacts.filter((c) => {
-      // VC_ALL is a virtual group, not a stored type: it spans VC and
-      // VC_CRYPTO_LIST. Many firms tagged as crypto investors are ordinary
-      // VCs, so treating them as one pool is what the matching step has
-      // always done — this just makes the contacts tab agree with it.
-      if (contactTypeFilter === "VC_ALL") {
-        if (!c.type.startsWith("VC")) return false;
-      } else if (contactTypeFilter !== "ALL" && c.type !== contactTypeFilter) {
-        return false;
-      }
+      if (contactTypeFilter !== "ALL" && c.type !== contactTypeFilter) return false;
       if (!q) return true;
       return (
         c.org.toLowerCase().includes(q) ||
@@ -2237,112 +2285,6 @@ BODY:
             </Card>
 
             {/* New contact form */}
-            <Card style={{ marginBottom: 16 }}>
-              <H sub="한 개씩 추가하거나 여러 개를 한 번에 붙여넣으세요">
-                새 컨택 추가
-              </H>
-
-              {/* Single contact form */}
-              <div style={{ marginBottom: 20, borderBottom: `1px solid ${C.line}`, paddingBottom: 16 }}>
-                <div style={{ fontSize: 12, color: C.mute, marginBottom: 12, fontWeight: 600 }}>
-                  한 개씩 추가
-                </div>
-                <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(200px, 1fr))", gap: 12, marginBottom: 12 }}>
-                  <Field
-                    label="이메일"
-                    value={newContact.email}
-                    onChange={(v) => setNewContact({ ...newContact, email: v })}
-                    ph="user@example.com"
-                  />
-                  <Field
-                    label="회사"
-                    value={newContact.org}
-                    onChange={(v) => setNewContact({ ...newContact, org: v })}
-                  />
-                  <Field
-                    label="담당자"
-                    value={newContact.person}
-                    onChange={(v) => setNewContact({ ...newContact, person: v })}
-                  />
-                  <Field
-                    label="직함"
-                    value={newContact.title}
-                    onChange={(v) => setNewContact({ ...newContact, title: v })}
-                  />
-                  <Field
-                    label="국가"
-                    value={newContact.country}
-                    onChange={(v) => setNewContact({ ...newContact, country: v })}
-                    ph="South Korea"
-                  />
-                  <label style={{ display: "block" }}>
-                    <div style={{ fontSize: 11, fontWeight: 600, letterSpacing: "0.06em", textTransform: "uppercase", color: C.mute, marginBottom: 5 }}>
-                      유형
-                    </div>
-                    <select
-                      value={newContact.type}
-                      onChange={(e) => setNewContact({ ...newContact, type: e.target.value })}
-                      style={{
-                        width: "100%",
-                        padding: "8px",
-                        border: `1px solid ${C.line}`,
-                        borderRadius: 4,
-                        background: C.surface,
-                        fontSize: 13,
-                      }}
-                    >
-                      {TYPE_OPTIONS.map((t) => (
-                        <option key={t} value={t}>
-                          {t}
-                        </option>
-                      ))}
-                    </select>
-                  </label>
-                </div>
-                <Field
-                  label="메모"
-                  value={newContact.notes}
-                  onChange={(v) => setNewContact({ ...newContact, notes: v })}
-                  area
-                  rows={2}
-                />
-                <Btn onClick={addContact} disabled={!!busy || !newContact.email}>
-                  {busy === "addContact" ? "추가 중…" : "추가"}
-                </Btn>
-              </div>
-
-              {/* Bulk paste form */}
-              <div>
-                <div style={{ fontSize: 12, color: C.mute, marginBottom: 12, fontWeight: 600 }}>
-                  여러 개 일괄 추가 (탭/쉼표 구분)
-                </div>
-                <div style={{ fontSize: 11, color: C.mute, marginBottom: 10, lineHeight: 1.6 }}>
-                  형식: email[탭/쉼표]회사[탭/쉼표]담당자[탭/쉼표]직함[탭/쉼표]국가[탭/쉼표]유형[탭/쉼표]메모
-                  <br />
-                  예: user@example.com, Acme, John Doe, VP Sales, South Korea, CORPORATE_KR, 추가 메모
-                </div>
-                <textarea
-                  value={bulkPasteText}
-                  onChange={(e) => setBulkPasteText(e.target.value)}
-                  placeholder="한 줄에 한 컨택씩&#10;또는 Excel/Google Sheets에서 여러 행을 선택해 Ctrl+C 후 여기 Ctrl+V"
-                  style={{
-                    width: "100%",
-                    minHeight: 120,
-                    padding: 10,
-                    border: `1px solid ${C.line}`,
-                    borderRadius: 4,
-                    background: C.surface,
-                    fontSize: 13,
-                    fontFamily: "monospace",
-                    marginBottom: 12,
-                  }}
-                />
-                <Btn onClick={addContactsBulk} disabled={!!busy || !bulkPasteText.trim()}>
-                  {busy === "addContactsBulk" ? "추가 중…" : "일괄 추가"}
-                </Btn>
-              </div>
-            </Card>
-
             <Card>
               {contacts.length === 0 && busy !== "loadContacts" && (
                 <div
@@ -2370,40 +2312,6 @@ BODY:
                     gap: 10,
                   }}
                 >
-                  {(() => {
-                    const vcCount = contacts.filter((c) =>
-                      c.type.startsWith("VC")
-                    ).length;
-                    if (!vcCount) return null;
-                    const on = contactTypeFilter === "VC_ALL";
-                    return (
-                      <button
-                        onClick={() => setContactTypeFilter(on ? "ALL" : "VC_ALL")}
-                        style={{
-                          textAlign: "left",
-                          cursor: "pointer",
-                          border: `1px solid ${on ? C.pine : C.pine}`,
-                          background: on ? C.pineSoft : C.surface,
-                          borderRadius: 6,
-                          padding: "10px 12px",
-                          transition: "all .12s",
-                        }}
-                      >
-                        <div
-                          style={{
-                            fontFamily: "'JetBrains Mono', monospace",
-                            fontSize: 18,
-                            color: C.pine,
-                          }}
-                        >
-                          {vcCount}
-                        </div>
-                        <div style={{ fontSize: 11, color: C.pine, fontWeight: 600 }}>
-                          VC 전체 (일반+크립토)
-                        </div>
-                      </button>
-                    );
-                  })()}
                   {Object.entries(
                     contacts.reduce((a, c) => {
                       a[c.type] = (a[c.type] || 0) + 1;
@@ -2486,99 +2394,6 @@ BODY:
                   </div>
                 </div>
 
-                {/* Bulk correction bar. The imported list has systematic
-                    errors — e.g. Korean funds carrying "Singapore" as their
-                    country — and fixing those one row at a time is not
-                    realistic across hundreds of records. */}
-                <div
-                  style={{
-                    display: "flex",
-                    alignItems: "center",
-                    gap: 8,
-                    flexWrap: "wrap",
-                    padding: "10px 16px",
-                    borderBottom: `1px solid ${C.line}`,
-                    background: selectedIds.length ? C.pineSoft : "#FAFBFC",
-                  }}
-                >
-                  <label
-                    style={{
-                      display: "flex",
-                      alignItems: "center",
-                      gap: 6,
-                      fontSize: 12,
-                      color: C.mute,
-                      cursor: "pointer",
-                    }}
-                  >
-                    <input
-                      type="checkbox"
-                      checked={
-                        filteredContacts.length > 0 &&
-                        selectedIds.length === filteredContacts.length
-                      }
-                      onChange={(e) =>
-                        setSelectedIds(
-                          e.target.checked ? filteredContacts.map((c) => c.id) : []
-                        )
-                      }
-                    />
-                    현재 필터 전체 선택
-                  </label>
-
-                  <span style={{ fontSize: 12, color: selectedIds.length ? C.pine : C.mute }}>
-                    {selectedIds.length
-                      ? `${selectedIds.length.toLocaleString()}건 선택됨`
-                      : "선택 없음"}
-                  </span>
-
-                  <select
-                    value={bulkType}
-                    onChange={(e) => setBulkType(e.target.value)}
-                    style={{
-                      padding: "6px 8px",
-                      border: `1px solid ${C.line}`,
-                      borderRadius: 4,
-                      fontSize: 12,
-                      background: C.surface,
-                    }}
-                  >
-                    <option value="">유형 변경 안 함</option>
-                    {TYPE_OPTIONS.map((t) => (
-                      <option key={t} value={t}>
-                        {t}
-                      </option>
-                    ))}
-                  </select>
-
-                  <input
-                    value={bulkCountry}
-                    onChange={(e) => setBulkCountry(e.target.value)}
-                    placeholder="국가 변경 (예: South Korea)"
-                    style={{
-                      padding: "6px 8px",
-                      border: `1px solid ${C.line}`,
-                      borderRadius: 4,
-                      fontSize: 12,
-                      width: 200,
-                      background: C.surface,
-                    }}
-                  />
-
-                  <Btn
-                    small
-                    onClick={applyBulk}
-                    disabled={!selectedIds.length || !!busy}
-                  >
-                    {busy === "contact" ? "적용 중…" : "선택 항목에 적용"}
-                  </Btn>
-                  {selectedIds.length > 0 && (
-                    <Btn small kind="ghost" onClick={() => setSelectedIds([])}>
-                      선택 해제
-                    </Btn>
-                  )}
-                </div>
-
                 <div style={{ maxHeight: 460, overflowY: "auto" }}>
                   {filteredContacts.slice(0, 300).map((c) => (
                     <div
@@ -2598,18 +2413,6 @@ BODY:
                         padding: "9px 16px",
                       }}
                      >
-                      <input
-                        type="checkbox"
-                        checked={selectedIds.includes(c.id)}
-                        onChange={(e) =>
-                          setSelectedIds((prev) =>
-                            e.target.checked
-                              ? [...prev, c.id]
-                              : prev.filter((x) => x !== c.id)
-                          )
-                        }
-                        style={{ flexShrink: 0, cursor: "pointer" }}
-                      />
                       <div
                         style={{
                           width: 92,
@@ -2743,7 +2546,7 @@ BODY:
                             </label>
                           </div>
                           <Field
-                            label="메모 (매칭 근거에 사용됩니다)"
+                            label="회사 설명 (매칭 근거로 사용됩니다)"
                             value={editRow.notes}
                             area
                             rows={2}
@@ -3754,8 +3557,141 @@ BODY:
                   <Mail size={26} color={C.line} strokeWidth={1.6} />
                   초안이 없습니다. 매칭 탭에서 생성하세요.
                 </div>
+
+                {filteredContacts.length > 300 && (
+                  <div
+                    style={{
+                      padding: "10px 16px",
+                      fontSize: 11,
+                      color: C.mute,
+                      borderTop: `1px solid ${C.line}`,
+                    }}
+                  >
+                    상위 300건만 표시됩니다. 검색으로 좁혀보세요.
+                  </div>
+                )}
               </Card>
             )}
+
+            {/* Adding a contact by hand is the exception, not the norm — the
+                CSV upload covers bulk. So this sits below the list and stays
+                collapsed until it is actually needed. */}
+            <Card style={{ marginTop: 16 }}>
+              <button
+                onClick={() => setShowAddContact(!showAddContact)}
+                style={{
+                  display: "flex",
+                  alignItems: "center",
+                  gap: 8,
+                  width: "100%",
+                  border: "none",
+                  background: "none",
+                  padding: 0,
+                  cursor: "pointer",
+                  textAlign: "left",
+                  fontFamily: "Inter, sans-serif",
+                  fontSize: 13,
+                  fontWeight: 600,
+                  color: C.ink,
+                }}
+              >
+                <span
+                  style={{
+                    display: "inline-block",
+                    transform: showAddContact ? "rotate(90deg)" : "none",
+                    transition: "transform .15s",
+                    color: C.mute,
+                  }}
+                >
+                  ▶
+                </span>
+                컨택 직접 추가
+                <span style={{ fontWeight: 400, color: C.mute, fontSize: 11 }}>
+                  — 한 건씩 입력. 여러 건은 CSV 업로드가 빠릅니다.
+                </span>
+              </button>
+
+              {showAddContact && (
+                <div style={{ marginTop: 18 }}>
+                  <div
+                    style={{
+                      display: "grid",
+                      gridTemplateColumns: "repeat(auto-fit, minmax(200px, 1fr))",
+                      gap: 12,
+                    }}
+                  >
+                    <Field
+                      label="이메일"
+                      value={newContact.email}
+                      onChange={(v) => setNewContact({ ...newContact, email: v })}
+                      ph="user@example.com"
+                    />
+                    <Field
+                      label="회사"
+                      value={newContact.org}
+                      onChange={(v) => setNewContact({ ...newContact, org: v })}
+                    />
+                    <Field
+                      label="담당자"
+                      value={newContact.person}
+                      onChange={(v) => setNewContact({ ...newContact, person: v })}
+                    />
+                    <Field
+                      label="직함"
+                      value={newContact.title}
+                      onChange={(v) => setNewContact({ ...newContact, title: v })}
+                    />
+                    <Field
+                      label="국가"
+                      value={newContact.country}
+                      onChange={(v) => setNewContact({ ...newContact, country: v })}
+                      ph="South Korea"
+                    />
+                    <label style={{ display: "block", marginBottom: 14 }}>
+                      <div
+                        style={{
+                          fontFamily: "Inter, sans-serif",
+                          fontSize: 11,
+                          fontWeight: 600,
+                          letterSpacing: "0.06em",
+                          textTransform: "uppercase",
+                          color: C.mute,
+                          marginBottom: 5,
+                        }}
+                      >
+                        유형
+                      </div>
+                      <select
+                        value={newContact.type}
+                        onChange={(e) =>
+                          setNewContact({ ...newContact, type: e.target.value })
+                        }
+                        style={inputStyle(false)}
+                      >
+                        {TYPE_OPTIONS.map((t) => (
+                          <option key={t} value={t}>
+                            {t}
+                          </option>
+                        ))}
+                      </select>
+                    </label>
+                  </div>
+
+                  <Field
+                    label="회사 설명 (매칭 근거로 사용됩니다)"
+                    value={newContact.notes}
+                    onChange={(v) => setNewContact({ ...newContact, notes: v })}
+                    area
+                    rows={2}
+                    ph="사업 영역, 규모, 주력 제품 등 — 매칭 점수와 메일 문구가 이 내용을 근거로 만들어집니다."
+                  />
+
+                  <Btn onClick={addContact} disabled={!!busy || !newContact.email}>
+                    {busy === "addContact" ? "추가 중…" : "추가"}
+                  </Btn>
+                </div>
+              )}
+            </Card>
           </div>
         )}
 
