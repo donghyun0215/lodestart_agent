@@ -1479,9 +1479,25 @@ BODY:
     return { ...pr, orig: pr.body, edited: false, bundle: names };
   };
 
+  // Which startup profile to write about for a contact that is NOT being
+  // bundled. Bug this fixes: the draft used to always write about the
+  // primary startup, even when an extra startup scored far higher for this
+  // specific contact but didn't clear BUNDLE_MIN together with a second one
+  // — so a contact could show "CUSHION 82 / Willog 25" and still get a
+  // Willog email, because Willog was whichever profile happened to be first.
+  // Now: if only one startup qualifies, or the qualifying set doesn't meet
+  // the bundle threshold, write about whichever one actually scored highest
+  // for this contact — not whichever is "primary".
+  const startupForContact = (c) => {
+    if (allStartups.length < 2) return startup;
+    const best = scores[c.id]?.startup;
+    return allStartups.find((t) => t.name === best) || startup;
+  };
+
   const draftFor = async (c) => {
     const bundle = bundleFor(c.id);
     if (bundle.length >= 2) return draftBundle(c, bundle);
+    const target = startupForContact(c);
     const a = AUDIENCES[audience];
     const langBlock =
       lang === "KO"
@@ -1505,7 +1521,7 @@ ${c.org} (${c.country})
 Context: ${c.notes || "none"}
 
 STARTUP BEING INTRODUCED
-${profileText()}
+${profileTextFor(target)}
 
 WHY THIS RECIPIENT (from screening)
 ${scores[c.id]?.reason || ""}
@@ -1536,7 +1552,7 @@ BODY:
     const p = parseDraft(out);
     // Keep the untouched AI version. commitEdit() diffs against this, not
     // against the live textarea value (see the bug note in commitEdit).
-    return { ...p, orig: p.body, edited: false };
+    return { ...p, orig: p.body, edited: false, usedStartup: target.name };
   };
 
   const runDrafts = async () => {
@@ -2597,6 +2613,126 @@ BODY:
               </Card>
             )}
 
+            {/* Adding a contact by hand is the exception, not the norm — the
+                CSV upload covers bulk. So this sits below the list and stays
+                collapsed until it is actually needed. */}
+            <Card style={{ marginTop: 16 }}>
+              <button
+                onClick={() => setShowAddContact(!showAddContact)}
+                style={{
+                  display: "flex",
+                  alignItems: "center",
+                  gap: 8,
+                  width: "100%",
+                  border: "none",
+                  background: "none",
+                  padding: 0,
+                  cursor: "pointer",
+                  textAlign: "left",
+                  fontFamily: "Inter, sans-serif",
+                  fontSize: 13,
+                  fontWeight: 600,
+                  color: C.ink,
+                }}
+              >
+                <span
+                  style={{
+                    display: "inline-block",
+                    transform: showAddContact ? "rotate(90deg)" : "none",
+                    transition: "transform .15s",
+                    color: C.mute,
+                  }}
+                >
+                  ▶
+                </span>
+                컨택 직접 추가
+                <span style={{ fontWeight: 400, color: C.mute, fontSize: 11 }}>
+                  — 한 건씩 입력. 여러 건은 CSV 업로드가 빠릅니다.
+                </span>
+              </button>
+
+              {showAddContact && (
+                <div style={{ marginTop: 18 }}>
+                  <div
+                    style={{
+                      display: "grid",
+                      gridTemplateColumns: "repeat(auto-fit, minmax(200px, 1fr))",
+                      gap: 12,
+                    }}
+                  >
+                    <Field
+                      label="이메일"
+                      value={newContact.email}
+                      onChange={(v) => setNewContact({ ...newContact, email: v })}
+                      ph="user@example.com"
+                    />
+                    <Field
+                      label="회사"
+                      value={newContact.org}
+                      onChange={(v) => setNewContact({ ...newContact, org: v })}
+                    />
+                    <Field
+                      label="담당자"
+                      value={newContact.person}
+                      onChange={(v) => setNewContact({ ...newContact, person: v })}
+                    />
+                    <Field
+                      label="직함"
+                      value={newContact.title}
+                      onChange={(v) => setNewContact({ ...newContact, title: v })}
+                    />
+                    <Field
+                      label="국가"
+                      value={newContact.country}
+                      onChange={(v) => setNewContact({ ...newContact, country: v })}
+                      ph="South Korea"
+                    />
+                    <label style={{ display: "block", marginBottom: 14 }}>
+                      <div
+                        style={{
+                          fontFamily: "Inter, sans-serif",
+                          fontSize: 11,
+                          fontWeight: 600,
+                          letterSpacing: "0.06em",
+                          textTransform: "uppercase",
+                          color: C.mute,
+                          marginBottom: 5,
+                        }}
+                      >
+                        유형
+                      </div>
+                      <select
+                        value={newContact.type}
+                        onChange={(e) =>
+                          setNewContact({ ...newContact, type: e.target.value })
+                        }
+                        style={inputStyle(false)}
+                      >
+                        {TYPE_OPTIONS.map((t) => (
+                          <option key={t} value={t}>
+                            {t}
+                          </option>
+                        ))}
+                      </select>
+                    </label>
+                  </div>
+
+                  <Field
+                    label="회사 설명 (매칭 근거로 사용됩니다)"
+                    value={newContact.notes}
+                    onChange={(v) => setNewContact({ ...newContact, notes: v })}
+                    area
+                    rows={2}
+                    ph="사업 영역, 규모, 주력 제품 등 — 매칭 점수와 메일 문구가 이 내용을 근거로 만들어집니다."
+                  />
+
+                  <Btn onClick={addContact} disabled={!!busy || !newContact.email}>
+                    {busy === "addContact" ? "추가 중…" : "추가"}
+                  </Btn>
+                </div>
+              )}
+            </Card>
+
             {contacts.length > 0 && (
               <div style={{ marginTop: 16 }}>
                 <Btn onClick={() => setTab("startup")}>다음 · 스타트업 입력</Btn>
@@ -3403,6 +3539,25 @@ BODY:
                               🔗 {d.bundle.length}개 묶음
                             </span>
                           )}
+                          {/* Flags a single-startup draft that is NOT about
+                              the primary profile — i.e. an extra startup
+                              scored best for this contact specifically. */}
+                          {!d.bundle && d.usedStartup && d.usedStartup !== startup.name && (
+                            <span
+                              style={{
+                                marginLeft: 8,
+                                fontSize: 10,
+                                fontWeight: 700,
+                                color: "#B3541E",
+                                background: "#FBEAD9",
+                                borderRadius: 3,
+                                padding: "2px 6px",
+                              }}
+                              title="이 회사는 대표 스타트업이 아니라, 이 컨택에서 가장 점수가 높았던 스타트업으로 작성됐습니다."
+                            >
+                              ★ {d.usedStartup}
+                            </span>
+                          )}
                         </div>
                         <div
                           style={{
@@ -3573,125 +3728,7 @@ BODY:
               </Card>
             )}
 
-            {/* Adding a contact by hand is the exception, not the norm — the
-                CSV upload covers bulk. So this sits below the list and stays
-                collapsed until it is actually needed. */}
-            <Card style={{ marginTop: 16 }}>
-              <button
-                onClick={() => setShowAddContact(!showAddContact)}
-                style={{
-                  display: "flex",
-                  alignItems: "center",
-                  gap: 8,
-                  width: "100%",
-                  border: "none",
-                  background: "none",
-                  padding: 0,
-                  cursor: "pointer",
-                  textAlign: "left",
-                  fontFamily: "Inter, sans-serif",
-                  fontSize: 13,
-                  fontWeight: 600,
-                  color: C.ink,
-                }}
-              >
-                <span
-                  style={{
-                    display: "inline-block",
-                    transform: showAddContact ? "rotate(90deg)" : "none",
-                    transition: "transform .15s",
-                    color: C.mute,
-                  }}
-                >
-                  ▶
-                </span>
-                컨택 직접 추가
-                <span style={{ fontWeight: 400, color: C.mute, fontSize: 11 }}>
-                  — 한 건씩 입력. 여러 건은 CSV 업로드가 빠릅니다.
-                </span>
-              </button>
 
-              {showAddContact && (
-                <div style={{ marginTop: 18 }}>
-                  <div
-                    style={{
-                      display: "grid",
-                      gridTemplateColumns: "repeat(auto-fit, minmax(200px, 1fr))",
-                      gap: 12,
-                    }}
-                  >
-                    <Field
-                      label="이메일"
-                      value={newContact.email}
-                      onChange={(v) => setNewContact({ ...newContact, email: v })}
-                      ph="user@example.com"
-                    />
-                    <Field
-                      label="회사"
-                      value={newContact.org}
-                      onChange={(v) => setNewContact({ ...newContact, org: v })}
-                    />
-                    <Field
-                      label="담당자"
-                      value={newContact.person}
-                      onChange={(v) => setNewContact({ ...newContact, person: v })}
-                    />
-                    <Field
-                      label="직함"
-                      value={newContact.title}
-                      onChange={(v) => setNewContact({ ...newContact, title: v })}
-                    />
-                    <Field
-                      label="국가"
-                      value={newContact.country}
-                      onChange={(v) => setNewContact({ ...newContact, country: v })}
-                      ph="South Korea"
-                    />
-                    <label style={{ display: "block", marginBottom: 14 }}>
-                      <div
-                        style={{
-                          fontFamily: "Inter, sans-serif",
-                          fontSize: 11,
-                          fontWeight: 600,
-                          letterSpacing: "0.06em",
-                          textTransform: "uppercase",
-                          color: C.mute,
-                          marginBottom: 5,
-                        }}
-                      >
-                        유형
-                      </div>
-                      <select
-                        value={newContact.type}
-                        onChange={(e) =>
-                          setNewContact({ ...newContact, type: e.target.value })
-                        }
-                        style={inputStyle(false)}
-                      >
-                        {TYPE_OPTIONS.map((t) => (
-                          <option key={t} value={t}>
-                            {t}
-                          </option>
-                        ))}
-                      </select>
-                    </label>
-                  </div>
-
-                  <Field
-                    label="회사 설명 (매칭 근거로 사용됩니다)"
-                    value={newContact.notes}
-                    onChange={(v) => setNewContact({ ...newContact, notes: v })}
-                    area
-                    rows={2}
-                    ph="사업 영역, 규모, 주력 제품 등 — 매칭 점수와 메일 문구가 이 내용을 근거로 만들어집니다."
-                  />
-
-                  <Btn onClick={addContact} disabled={!!busy || !newContact.email}>
-                    {busy === "addContact" ? "추가 중…" : "추가"}
-                  </Btn>
-                </div>
-              )}
-            </Card>
           </div>
         )}
 
