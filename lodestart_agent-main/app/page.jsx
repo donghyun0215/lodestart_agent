@@ -135,6 +135,17 @@ const MAX_BUNDLE = 3;
 // along in that contact's email.
 const BUNDLE_MIN = 65;
 
+// A company description shorter than this is treated as missing. The imported
+// corporate list came out of OCR and left values like "Laws", "F&B", "ost" —
+// a category tag, not something a matcher can reason about. Median length in
+// that import was 18 characters, so the bar is set above it deliberately.
+const NOTE_MIN_CHARS = 40;
+
+// Rows worth researching: there has to be a company name to look up, and the
+// existing description has to be missing or too thin to be useful.
+const needsNote = (c) =>
+  !!c.org && (c.notes || "").trim().length < NOTE_MIN_CHARS;
+
 const DEFAULT_TONE = {
   rules:
     "- Warm but businesslike. No hype, no superlatives.\n" +
@@ -955,9 +966,9 @@ export default function App() {
   // previous run) is left alone, so this is safe to re-run and resumes where
   // it stopped.
   const enrichNotes = async () => {
-    const targets = filteredContacts.filter((c) => !c.notes && c.org);
+    const targets = filteredContacts.filter(needsNote);
     if (!targets.length) {
-      setDbNote("현재 목록에는 설명이 비어 있는 컨택이 없습니다.");
+      setDbNote("현재 목록에는 보충이 필요한 회사 설명이 없습니다.");
       return;
     }
     setBusy("enrich");
@@ -983,11 +994,18 @@ export default function App() {
       // Only the company name and country go out — no person names, no email
       // addresses. There is no reason to put personal data into a search query.
       const list = chunk
-        .map((c, j) => `${j}. ${c.org}${c.country ? ` (${c.country})` : ""}`)
+        .map((c, j) => {
+          const hint = (c.notes || "").trim();
+          return `${j}. ${c.org}${c.country ? ` (${c.country})` : ""}${
+            hint ? ` [existing tag: ${hint}]` : ""
+          }`;
+        })
         .join("\n");
       const prompt = `Look up each company below and write a one-line factual description of what it does.
 
 ${list}
+
+Some entries carry an "existing tag" — a short category label from an earlier import (e.g. "Laws", "F&B"). Treat it as a hint about the sector and confirm or correct it; do not simply repeat it back.
 
 For each: what the company actually does, its sector, and its rough size or notability if that is quickly established. This text will be used to judge whether a B2B technology pitch is relevant to them, so lead with the business activity, not with marketing language.
 
@@ -1016,6 +1034,13 @@ Return ONLY a JSON array, no prose, no markdown:
         const desc = String(r.desc || "").trim();
         if (!c) return;
         if (!desc) {
+          notFound += 1;
+          return;
+        }
+        // Never trade down. If the lookup came back with something no better
+        // than the tag already on file, keep what's there — this job is only
+        // allowed to improve a description, never to degrade one.
+        if (desc.length <= (c.notes || "").trim().length) {
           notFound += 1;
           return;
         }
@@ -1051,7 +1076,7 @@ Return ONLY a JSON array, no prose, no markdown:
       setDbNote(
         `회사 설명 ${filled}건을 채웠습니다.` +
           (notFound
-            ? ` ${notFound}건은 확실한 정보를 찾지 못해 비워뒀습니다 — 추측으로 채우지 않았습니다.`
+            ? ` ${notFound}건은 더 나은 정보를 찾지 못해 기존 값을 그대로 뒀습니다 — 추측으로 채우지 않았습니다.`
             : "") +
           (failed
             ? ` ${failed}건은 호출 오류로 시도조차 못 했습니다 — 버튼을 다시 누르면 이 건들만 자동으로 재시도됩니다.`
@@ -2495,11 +2520,13 @@ BODY:
                     own instead of accidentally kicking off a run over
                     everything. */}
                 {(() => {
-                  const empty = filteredContacts.filter((c) => !c.notes && c.org);
-                  if (!empty.length) return null;
+                  const weak = filteredContacts.filter(needsNote);
+                  if (!weak.length) return null;
+                  const blank = weak.filter((c) => !(c.notes || "").trim()).length;
+                  const thin = weak.length - blank;
                   // 4 companies per call, ~2 searches each — matches the
                   // actual budget in enrichNotes() below.
-                  const batches = Math.ceil(empty.length / 4);
+                  const batches = Math.ceil(weak.length / 4);
                   return (
                     <div
                       style={{
@@ -2515,9 +2542,16 @@ BODY:
                       }}
                     >
                       <span style={{ flex: 1, minWidth: 240, lineHeight: 1.6 }}>
-                        현재 필터의 <b>{empty.length.toLocaleString()}건</b>은 회사 설명이
-                        비어 있습니다 (매칭 근거로 쓰이는 필드). 웹 검색으로 채울 수 있지만
-                        토큰 비용이 듭니다 — 약 {batches}회 검색 호출.
+                        현재 필터의 <b>{weak.length.toLocaleString()}건</b>은 회사 설명이
+                        부실합니다
+                        {blank > 0 && thin > 0
+                          ? ` (비어 있음 ${blank.toLocaleString()}건, 너무 짧음 ${thin.toLocaleString()}건)`
+                          : thin > 0
+                          ? ` (${NOTE_MIN_CHARS}자 미만)`
+                          : " (비어 있음)"}
+                        . 매칭 근거로 쓰이는 필드입니다. 웹 검색으로 보충할 수 있지만 토큰
+                        비용이 듭니다 — 약 {batches}회 검색 호출. 기존 설명보다 나은 결과를
+                        찾은 경우에만 덮어씁니다.
                         {contactTypeFilter === "ALL" && (
                           <> 먼저 유형 필터로 좁혀서 소량으로 시도해보길 권장합니다.</>
                         )}
@@ -2525,7 +2559,7 @@ BODY:
                       <Btn small onClick={enrichNotes} disabled={!!busy}>
                         {busy === "enrich"
                           ? `조사 중… ${progress}%`
-                          : `웹에서 조사해 채우기 (${empty.length.toLocaleString()}건)`}
+                          : `웹에서 조사해 보충 (${weak.length.toLocaleString()}건)`}
                       </Btn>
                     </div>
                   );
@@ -2580,6 +2614,31 @@ BODY:
                             {c.person}
                             {c.title ? ` · ${c.title}` : ""}
                           </div>
+                        )}
+                        {/* The description drives matching, so it should be
+                            visible at a glance rather than hidden behind the
+                            edit form. Truncated inline; full text on hover. */}
+                        {c.notes ? (
+                          <div
+                            title={c.notes}
+                            style={{
+                              color: C.mute,
+                              fontSize: 11,
+                              opacity: 0.85,
+                              overflow: "hidden",
+                              textOverflow: "ellipsis",
+                              whiteSpace: "nowrap",
+                              cursor: "help",
+                            }}
+                          >
+                            {c.notes}
+                          </div>
+                        ) : (
+                          c.org && (
+                            <div style={{ color: "#B3541E", fontSize: 11, opacity: 0.75 }}>
+                              설명 없음
+                            </div>
+                          )
                         )}
                       </div>
                       <div
