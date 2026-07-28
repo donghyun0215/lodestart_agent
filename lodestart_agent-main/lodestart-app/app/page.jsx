@@ -1,6 +1,7 @@
 "use client";
 import React, { useState, useEffect, useMemo, useCallback } from "react";
 import Papa from "papaparse";
+import * as HoverCard from "@radix-ui/react-hover-card";
 import { supabase } from "../lib/supabase";
 import {
   Users,
@@ -15,7 +16,6 @@ import {
   Check,
   X,
   Loader2,
-  Compass,
   Search,
   Database,
   RefreshCw,
@@ -28,20 +28,65 @@ import {
 /* ------------------------------------------------------------------ */
 
 const FONTS = `
-@import url('https://fonts.googleapis.com/css2?family=Archivo:wght@500;600;700&family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap');
+@import url('https://fonts.googleapis.com/css2?family=Schibsted+Grotesk:wght@500;600;700;800&family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500;700&display=swap');
+
+/* Chart-paper ground: a faint dot grid over a cool wash, with two soft
+   radial glows (harbor-green portside, polaris-gold high starboard).
+   Fixed attachment so cards feel like they float above the chart. */
+body {
+  background-color: #F3F6F8;
+  background-image:
+    radial-gradient(1100px 520px at 8% -8%, rgba(35,89,74,0.07), transparent 60%),
+    radial-gradient(900px 480px at 96% 4%, rgba(168,132,47,0.05), transparent 55%),
+    radial-gradient(rgba(12,26,42,0.055) 1px, transparent 1px);
+  background-size: auto, auto, 22px 22px;
+  background-attachment: fixed;
+}
+
 @keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
 .spin { animation: spin 1s linear infinite; }
+@keyframes hoverCardIn {
+  from { opacity: 0; transform: translateY(2px) scale(0.985); }
+  to   { opacity: 1; transform: none; }
+}
+/* Tab content entrance — one orchestrated moment, nothing scattered. */
+@keyframes chartIn {
+  from { opacity: 0; transform: translateY(7px); }
+  to   { opacity: 1; transform: none; }
+}
+.chart-in { animation: chartIn .28s cubic-bezier(.2,.7,.3,1) both; }
+
+/* The polaris mark breathes very slowly — ambient, not attention-seeking. */
+@keyframes polaris {
+  0%, 100% { opacity: .85; transform: scale(1); }
+  50%      { opacity: 1;   transform: scale(1.06); }
+}
+
+input:focus, textarea:focus, select:focus {
+  border-color: #23594A !important;
+  box-shadow: 0 0 0 3px rgba(35,89,74,0.14);
+}
+button:focus-visible, a:focus-visible {
+  outline: 2px solid #23594A;
+  outline-offset: 2px;
+}
+::selection { background: rgba(35,89,74,0.18); }
+
+@media (prefers-reduced-motion: reduce) {
+  .chart-in { animation: none; }
+  * { transition-duration: .01ms !important; animation-duration: .01ms !important; }
+}
 `;
 
 const C = {
-  bg: "#EEF1F4",
+  bg: "transparent",     // real ground is painted in body CSS (chart paper)
   surface: "#FFFFFF",
-  ink: "#16202C",
-  mute: "#5C6B7A",
-  line: "#D6DCE3",
-  pine: "#2F5D50",      // accent — celadon/pine
-  pineSoft: "#E6EEEA",
-  brass: "#96762B",     // scores
+  ink: "#0C1A2A",        // harbor navy
+  mute: "#5A6B7C",
+  line: "#DFE5EA",
+  pine: "#23594A",       // brand green, deepened
+  pineSoft: "#E4EFE9",
+  brass: "#A8842F",      // polaris gold — scores, stars
   alert: "#8E2F2F",
 };
 
@@ -210,6 +255,134 @@ function maskEmail(email) {
   const local = email.slice(0, at);
   const domain = email.slice(at);
   return local[0] + "x".repeat(Math.max(local.length - 1, 3)) + domain;
+}
+
+// Hover preview for a contact row.
+//
+// This replaces a native `title` tooltip, which had two problems: the hover
+// target was the single truncated line of description text (easy to miss),
+// and the browser's default tooltip can't be styled to match anything. Here
+// the trigger is the whole info block of the row, and the panel is ours.
+//
+// Radix handles the parts that are tedious to get right by hand: portalling
+// out of the scroll container so the card isn't clipped, flipping/shifting
+// when near a viewport edge, and open/close timing that doesn't flicker when
+// the pointer crosses between rows.
+function ContactHoverCard({ contact, children }) {
+  const c = contact;
+  const hasNote = !!(c.notes || "").trim();
+  return (
+    <HoverCard.Root openDelay={180} closeDelay={80}>
+      <HoverCard.Trigger asChild>{children}</HoverCard.Trigger>
+      <HoverCard.Portal>
+        <HoverCard.Content
+          side="right"
+          align="start"
+          sideOffset={10}
+          collisionPadding={12}
+          style={{
+            zIndex: 60,
+            maxWidth: 420,
+            background: C.surface,
+            border: `1px solid ${C.line}`,
+            borderRadius: 8,
+            padding: "14px 16px",
+            boxShadow:
+              "0 12px 28px rgba(22,32,44,0.13), 0 2px 6px rgba(22,32,44,0.08)",
+            fontFamily: "Inter, sans-serif",
+            animation: "hoverCardIn .13s ease-out",
+          }}
+        >
+          <div
+            style={{
+              fontSize: 10,
+              fontWeight: 700,
+              letterSpacing: "0.07em",
+              color: C.pine,
+              marginBottom: 6,
+            }}
+          >
+            {c.type}
+          </div>
+
+          <div
+            style={{
+              fontSize: 14,
+              fontWeight: 700,
+              color: C.ink,
+              lineHeight: 1.35,
+            }}
+          >
+            {c.org || "(회사명 없음)"}
+          </div>
+
+          {(c.person || c.title) && (
+            <div style={{ fontSize: 12, color: C.mute, marginTop: 3 }}>
+              {c.person}
+              {c.title ? ` · ${c.title}` : ""}
+            </div>
+          )}
+
+          <div
+            style={{
+              marginTop: 11,
+              paddingTop: 11,
+              borderTop: `1px solid ${C.line}`,
+            }}
+          >
+            <div
+              style={{
+                fontSize: 10,
+                fontWeight: 600,
+                letterSpacing: "0.06em",
+                textTransform: "uppercase",
+                color: C.mute,
+                marginBottom: 5,
+              }}
+            >
+              회사 설명 · 매칭 근거
+            </div>
+            {hasNote ? (
+              <div
+                style={{
+                  fontSize: 12.5,
+                  color: C.ink,
+                  lineHeight: 1.65,
+                  whiteSpace: "pre-wrap",
+                }}
+              >
+                {c.notes}
+              </div>
+            ) : (
+              <div style={{ fontSize: 12.5, color: "#B3541E", lineHeight: 1.6 }}>
+                설명이 없습니다. 이 컨택은 회사명만 보고 채점됩니다 — 위의
+                “웹에서 조사해 보충”으로 채울 수 있습니다.
+              </div>
+            )}
+          </div>
+
+          <div
+            style={{
+              marginTop: 11,
+              paddingTop: 9,
+              borderTop: `1px solid ${C.line}`,
+              display: "flex",
+              gap: 10,
+              flexWrap: "wrap",
+              fontFamily: "'JetBrains Mono', monospace",
+              fontSize: 10.5,
+              color: C.mute,
+            }}
+          >
+            <span>{maskEmail(c.email)}</span>
+            {c.country && <span>· {c.country}</span>}
+          </div>
+
+          <HoverCard.Arrow width={11} height={6} style={{ fill: C.surface }} />
+        </HoverCard.Content>
+      </HoverCard.Portal>
+    </HoverCard.Root>
+  );
 }
 
 async function claude(prompt, maxTokens = 1000, tries = 0) {
@@ -407,28 +580,37 @@ const Btn = ({ children, onClick, kind = "primary", disabled, small, icon: Icon 
   const [hover, setHover] = useState(false);
   const base = {
     primary: {
-      background: hover && !disabled ? "#274F44" : C.pine,
+      // Subtle top-light gradient + inner highlight: depth without gimmick.
+      background: hover && !disabled
+        ? "linear-gradient(180deg, #2E7360 0%, #23594A 100%)"
+        : "linear-gradient(180deg, #2A6654 0%, #1E4C3F 100%)",
       color: "#fff",
-      border: `1px solid ${C.pine}`,
-      boxShadow: hover && !disabled ? "0 3px 10px rgba(47,93,80,0.28)" : "0 1px 2px rgba(47,93,80,0.15)",
+      border: "1px solid #1B453A",
+      boxShadow: hover && !disabled
+        ? "inset 0 1px 0 rgba(255,255,255,0.16), 0 6px 16px rgba(35,89,74,0.30)"
+        : "inset 0 1px 0 rgba(255,255,255,0.12), 0 2px 6px rgba(35,89,74,0.18)",
     },
     ghost: {
-      background: hover && !disabled ? "#F2F4F6" : "transparent",
+      background: hover && !disabled ? "#FFFFFF" : "rgba(255,255,255,0.6)",
       color: C.ink,
-      border: `1px solid ${C.line}`,
-      boxShadow: "none",
+      border: `1px solid ${hover && !disabled ? "#B9C5CE" : C.line}`,
+      boxShadow: hover && !disabled ? "0 3px 10px rgba(12,26,42,0.08)" : "0 1px 2px rgba(12,26,42,0.04)",
     },
     quiet: {
-      background: hover && !disabled ? "#F2F4F6" : "transparent",
+      background: hover && !disabled ? "rgba(12,26,42,0.05)" : "transparent",
       color: C.mute,
       border: "1px solid transparent",
       boxShadow: "none",
     },
     danger: {
-      background: hover && !disabled ? "#7A2828" : C.alert,
+      background: hover && !disabled
+        ? "linear-gradient(180deg, #9A3535 0%, #7A2828 100%)"
+        : "linear-gradient(180deg, #8E2F2F 0%, #732626 100%)",
       color: "#fff",
-      border: `1px solid ${C.alert}`,
-      boxShadow: hover && !disabled ? "0 3px 10px rgba(142,47,47,0.28)" : "none",
+      border: "1px solid #6B2222",
+      boxShadow: hover && !disabled
+        ? "inset 0 1px 0 rgba(255,255,255,0.12), 0 6px 16px rgba(142,47,47,0.30)"
+        : "inset 0 1px 0 rgba(255,255,255,0.10), 0 2px 6px rgba(142,47,47,0.16)",
     },
   }[kind];
   return (
@@ -441,8 +623,8 @@ const Btn = ({ children, onClick, kind = "primary", disabled, small, icon: Icon 
         ...base,
         opacity: disabled ? 0.4 : 1,
         cursor: disabled ? "not-allowed" : "pointer",
-        padding: small ? "5px 10px" : "9px 16px",
-        borderRadius: 5,
+        padding: small ? "6px 12px" : "10px 18px",
+        borderRadius: 8,
         display: "inline-flex",
         alignItems: "center",
         gap: 6,
@@ -498,9 +680,10 @@ const Field = ({ label, value, onChange, area, rows = 3, mono, ph }) => (
 const inputStyle = (mono) => ({
   width: "100%",
   boxSizing: "border-box",
-  padding: "9px 11px",
+  padding: "10px 13px",
   border: `1px solid ${C.line}`,
-  borderRadius: 4,
+  borderRadius: 8,
+  transition: "border-color .15s, box-shadow .15s",
   background: C.surface,
   color: C.ink,
   fontFamily: mono ? "'JetBrains Mono', monospace" : "Inter, sans-serif",
@@ -518,14 +701,16 @@ const Card = ({ children, pad = 20, style, hoverable }) => {
       onMouseLeave={() => hoverable && setHover(false)}
       style={{
         background: C.surface,
-        border: `1px solid ${hover ? "#C3CCD4" : C.line}`,
-        borderRadius: 8,
+        border: `1px solid ${hover ? "#C2CDD6" : C.line}`,
+        borderRadius: 14,
         padding: pad,
+        // Two-layer shadow reads as real elevation: a tight contact shadow
+        // plus a wide soft ambient one.
         boxShadow: hover
-          ? "0 6px 16px rgba(22,32,44,0.08)"
-          : "0 1px 3px rgba(22,32,44,0.04)",
+          ? "0 2px 4px rgba(12,26,42,0.06), 0 14px 34px rgba(12,26,42,0.10)"
+          : "0 1px 2px rgba(12,26,42,0.05), 0 6px 18px rgba(12,26,42,0.05)",
         transition: "box-shadow .18s, border-color .18s, transform .18s",
-        transform: hover ? "translateY(-1px)" : "none",
+        transform: hover ? "translateY(-2px)" : "none",
         ...style,
       }}
     >
@@ -538,10 +723,10 @@ const H = ({ children, sub, icon: Icon }) => (
   <div style={{ marginBottom: 16, display: "flex", gap: 10, alignItems: "flex-start" }}>
     <div
       style={{
-        width: 3,
+        width: 4,
         height: Icon ? 32 : 22,
-        borderRadius: 2,
-        background: `linear-gradient(180deg, ${C.pine}, #7CAE9B)`,
+        borderRadius: 3,
+        background: `linear-gradient(180deg, ${C.pine} 0%, ${C.brass} 130%)`,
         marginTop: 2,
         flexShrink: 0,
       }}
@@ -549,7 +734,7 @@ const H = ({ children, sub, icon: Icon }) => (
     <div>
       <div
         style={{
-          fontFamily: "Archivo, sans-serif",
+          fontFamily: "'Schibsted Grotesk', sans-serif",
           fontWeight: 700,
           fontSize: 16,
           color: C.ink,
@@ -577,25 +762,31 @@ const ScoreBar = ({ score }) => {
     <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
       <div
         style={{
-          width: 48,
-          height: 5,
-          background: "#E7EBEE",
-          borderRadius: 3,
+          width: 52,
+          height: 6,
+          background: "#E8EDF1",
+          borderRadius: 4,
           overflow: "hidden",
-          boxShadow: "inset 0 1px 1px rgba(22,32,44,0.06)",
+          boxShadow: "inset 0 1px 2px rgba(12,26,42,0.08)",
         }}
       >
         <div
           style={{
             width: `${score}%`,
             height: "100%",
-            borderRadius: 3,
+            borderRadius: 4,
             background:
               score >= 70
-                ? `linear-gradient(90deg, #2F5D50, #4A8A73)`
+                ? "linear-gradient(90deg, #1E4C3F, #2E7360 70%, #3E8F77)"
                 : score >= 45
-                ? `linear-gradient(90deg, #7A611F, #B08F35)`
+                ? "linear-gradient(90deg, #7A611F, #A8842F 70%, #C09A3E)"
                 : "#B7C1CA",
+            boxShadow:
+              score >= 70
+                ? "0 0 6px rgba(46,115,96,0.5)"
+                : score >= 45
+                ? "0 0 6px rgba(168,132,47,0.4)"
+                : "none",
             transition: "width .3s ease",
           }}
         />
@@ -2083,14 +2274,20 @@ BODY:
 
   if (!ready) return null;
 
-  const TABS = [
-    ["data", "1 · 컨택", Users],
-    ["startup", "2 · 스타트업", Building2],
-    ["match", "3 · 매칭", Sparkles],
-    ["review", "4 · 초안 검토", Mail],
+  // The first four ARE a sequence — data flows left to right through them —
+  // so the nav draws them as waypoints on a route. Dashboard and tone are
+  // views, not steps, and sit apart on the right.
+  const ROUTE_TABS = [
+    ["data", "컨택", Users],
+    ["startup", "스타트업", Building2],
+    ["match", "매칭", Sparkles],
+    ["review", "초안 검토", Mail],
+  ];
+  const UTIL_TABS = [
     ["dash", "대시보드", LayoutDashboard],
     ["voice", "톤 설정", SlidersHorizontal],
   ];
+  const routeIdx = ROUTE_TABS.findIndex(([id]) => id === tab);
 
   return (
     <div
@@ -2103,41 +2300,83 @@ BODY:
     >
       <style>{FONTS}</style>
 
-      {/* header */}
+      {/* header — the chart room's night sky. A faint polaris glow sits in
+          the top-right, and the mark itself is a four-point star (a lodestar,
+          which is what "Lodestart" is named for), not a generic compass. */}
       <div
         style={{
-          background: `linear-gradient(180deg, ${C.ink} 0%, #101923 100%)`,
-          padding: "15px 24px",
+          position: "relative",
+          overflow: "hidden",
+          background:
+            "radial-gradient(720px 300px at 88% -40%, rgba(168,132,47,0.20), transparent 62%)," +
+            "radial-gradient(560px 260px at 12% 120%, rgba(35,89,74,0.28), transparent 60%)," +
+            "linear-gradient(180deg, #0C1A2A 0%, #0A1622 100%)",
+          padding: "17px 28px",
           display: "flex",
           alignItems: "center",
-          gap: 14,
+          gap: 15,
           flexWrap: "wrap",
-          borderBottom: `2px solid ${C.pine}`,
+          borderBottom: "1px solid rgba(255,255,255,0.07)",
         }}
       >
+        {/* faint horizon line of chart ticks */}
+        <div
+          aria-hidden
+          style={{
+            position: "absolute",
+            inset: 0,
+            backgroundImage:
+              "repeating-linear-gradient(90deg, rgba(255,255,255,0.045) 0 1px, transparent 1px 56px)",
+            maskImage: "linear-gradient(180deg, transparent 55%, black 100%)",
+            WebkitMaskImage: "linear-gradient(180deg, transparent 55%, black 100%)",
+            pointerEvents: "none",
+          }}
+        />
         <div
           style={{
-            width: 30,
-            height: 30,
-            borderRadius: 7,
-            background: `linear-gradient(135deg, ${C.pine} 0%, #4A8A73 100%)`,
+            position: "relative",
+            width: 36,
+            height: 36,
+            borderRadius: 10,
+            background: "linear-gradient(145deg, #16303F 0%, #0E2230 100%)",
+            border: "1px solid rgba(255,255,255,0.10)",
+            boxShadow:
+              "inset 0 1px 0 rgba(255,255,255,0.08), 0 4px 14px rgba(0,0,0,0.35)",
             display: "flex",
             alignItems: "center",
             justifyContent: "center",
             flexShrink: 0,
           }}
         >
-          <Compass size={17} color="#fff" strokeWidth={2.2} />
+          {/* four-point lodestar */}
+          <svg
+            width="20"
+            height="20"
+            viewBox="0 0 24 24"
+            style={{ animation: "polaris 5s ease-in-out infinite" }}
+          >
+            <path
+              d="M12 1.5 L14.1 9.9 L22.5 12 L14.1 14.1 L12 22.5 L9.9 14.1 L1.5 12 L9.9 9.9 Z"
+              fill="url(#lodestarGrad)"
+            />
+            <defs>
+              <linearGradient id="lodestarGrad" x1="0" y1="0" x2="24" y2="24">
+                <stop offset="0%" stopColor="#E8D9A8" />
+                <stop offset="55%" stopColor="#C09A3E" />
+                <stop offset="100%" stopColor="#8AB79F" />
+              </linearGradient>
+            </defs>
+          </svg>
         </div>
-        <div>
+        <div style={{ position: "relative" }}>
           <div
             style={{
-              fontFamily: "Archivo, sans-serif",
-              fontWeight: 700,
-              fontSize: 15,
-              color: "#fff",
-              letterSpacing: "-0.01em",
-              lineHeight: 1.2,
+              fontFamily: "'Schibsted Grotesk', sans-serif",
+              fontWeight: 800,
+              fontSize: 16.5,
+              color: "#F4F7F9",
+              letterSpacing: "-0.015em",
+              lineHeight: 1.15,
             }}
           >
             Lodestart Outreach Desk
@@ -2146,8 +2385,9 @@ BODY:
             style={{
               fontFamily: "'JetBrains Mono', monospace",
               fontSize: 10.5,
-              color: "#7C8FA0",
-              marginTop: 1,
+              color: "#7E93A6",
+              marginTop: 2,
+              letterSpacing: "0.02em",
             }}
           >
             v1 · Gmail 초안 생성 · 실제 발송은 확인 후
@@ -2229,44 +2469,123 @@ BODY:
         </div>
       </div>
 
-      {/* tabs */}
+      {/* route stepper */}
       <div
         style={{
           display: "flex",
-          gap: 2,
-          padding: "0 24px",
-          background: C.surface,
+          alignItems: "center",
+          gap: 4,
+          padding: "12px 28px",
+          background: "rgba(255,255,255,0.82)",
+          backdropFilter: "blur(10px)",
+          WebkitBackdropFilter: "blur(10px)",
           borderBottom: `1px solid ${C.line}`,
           overflowX: "auto",
+          position: "sticky",
+          top: 0,
+          zIndex: 40,
         }}
       >
-        {TABS.map(([id, label, Icon]) => (
-          <button
-            key={id}
-            onClick={() => setTab(id)}
-            style={{
-              display: "flex",
-              alignItems: "center",
-              gap: 6,
-              background: tab === id ? C.pineSoft : "transparent",
-              border: "none",
-              borderRadius: "6px 6px 0 0",
-              borderBottom: `2px solid ${tab === id ? C.pine : "transparent"}`,
-              color: tab === id ? C.pine : C.mute,
-              padding: "11px 14px",
-              marginTop: 6,
-              fontFamily: "Inter, sans-serif",
-              fontSize: 13,
-              fontWeight: tab === id ? 600 : 500,
-              cursor: "pointer",
-              whiteSpace: "nowrap",
-              transition: "all .15s",
-            }}
-          >
-            <Icon size={14} strokeWidth={tab === id ? 2.4 : 2} />
-            {label}
-          </button>
-        ))}
+        {ROUTE_TABS.map(([id, label, Icon], i) => {
+          const active = tab === id;
+          const passed = routeIdx > -1 && i < routeIdx;
+          return (
+            <React.Fragment key={id}>
+              {i > 0 && (
+                <div
+                  aria-hidden
+                  style={{
+                    width: 26,
+                    height: 0,
+                    borderTop: `2px ${passed || active ? "solid" : "dashed"} ${
+                      passed || active ? C.pine : "#C9D2DA"
+                    }`,
+                    opacity: passed || active ? 0.85 : 0.7,
+                    flexShrink: 0,
+                    transition: "border-color .2s",
+                  }}
+                />
+              )}
+              <button
+                onClick={() => setTab(id)}
+                style={{
+                  display: "flex",
+                  alignItems: "center",
+                  gap: 7,
+                  background: active
+                    ? "linear-gradient(180deg, #2A6654 0%, #1E4C3F 100%)"
+                    : passed
+                    ? C.pineSoft
+                    : "transparent",
+                  border: `1px solid ${
+                    active ? "#1B453A" : passed ? "#CBDDD3" : "transparent"
+                  }`,
+                  borderRadius: 999,
+                  color: active ? "#fff" : passed ? C.pine : C.mute,
+                  padding: "8px 15px",
+                  fontFamily: "Inter, sans-serif",
+                  fontSize: 13,
+                  fontWeight: active ? 600 : 500,
+                  cursor: "pointer",
+                  whiteSpace: "nowrap",
+                  flexShrink: 0,
+                  boxShadow: active
+                    ? "inset 0 1px 0 rgba(255,255,255,0.14), 0 3px 10px rgba(35,89,74,0.28)"
+                    : "none",
+                  transition: "all .18s",
+                }}
+              >
+                <span
+                  style={{
+                    fontFamily: "'JetBrains Mono', monospace",
+                    fontSize: 10,
+                    fontWeight: 700,
+                    opacity: active ? 0.9 : 0.55,
+                  }}
+                >
+                  {String(i + 1).padStart(2, "0")}
+                </span>
+                <Icon size={14} strokeWidth={active ? 2.4 : 2} />
+                {label}
+              </button>
+            </React.Fragment>
+          );
+        })}
+
+        <div style={{ flex: 1, minWidth: 18 }} />
+        <div
+          aria-hidden
+          style={{ width: 1, alignSelf: "stretch", background: C.line, margin: "2px 6px" }}
+        />
+        {UTIL_TABS.map(([id, label, Icon]) => {
+          const active = tab === id;
+          return (
+            <button
+              key={id}
+              onClick={() => setTab(id)}
+              style={{
+                display: "flex",
+                alignItems: "center",
+                gap: 6,
+                background: active ? C.pineSoft : "transparent",
+                border: `1px solid ${active ? "#CBDDD3" : "transparent"}`,
+                borderRadius: 999,
+                color: active ? C.pine : C.mute,
+                padding: "8px 14px",
+                fontFamily: "Inter, sans-serif",
+                fontSize: 13,
+                fontWeight: active ? 600 : 500,
+                cursor: "pointer",
+                whiteSpace: "nowrap",
+                flexShrink: 0,
+                transition: "all .18s",
+              }}
+            >
+              <Icon size={14} strokeWidth={active ? 2.4 : 2} />
+              {label}
+            </button>
+          );
+        })}
       </div>
 
       {(err || busy) && (
@@ -2328,7 +2647,13 @@ BODY:
         </div>
       )}
 
-      <div style={{ maxWidth: 1080, margin: "0 auto", padding: "24px 24px 80px" }}>
+      {/* key={tab} restarts the entrance animation on every tab change —
+          one orchestrated moment instead of scattered effects */}
+      <div
+        key={tab}
+        className="chart-in"
+        style={{ maxWidth: 1160, margin: "0 auto", padding: "28px 24px 90px" }}
+      >
         {/* ------------------------------ DATA ---------------------------- */}
         {tab === "data" && (
           <div>
@@ -2598,49 +2923,51 @@ BODY:
                       >
                         {c.type}
                       </div>
-                      <div style={{ flex: "1 1 220px", minWidth: 0 }}>
-                        <div
-                          style={{
-                            fontWeight: 600,
-                            overflow: "hidden",
-                            textOverflow: "ellipsis",
-                            whiteSpace: "nowrap",
-                          }}
-                        >
-                          {c.org}
-                        </div>
-                        {c.person && (
-                          <div style={{ color: C.mute, fontSize: 11 }}>
-                            {c.person}
-                            {c.title ? ` · ${c.title}` : ""}
-                          </div>
-                        )}
-                        {/* The description drives matching, so it should be
-                            visible at a glance rather than hidden behind the
-                            edit form. Truncated inline; full text on hover. */}
-                        {c.notes ? (
+                      {/* The description drives matching, so it's shown in
+                          the row rather than hidden behind the edit form.
+                          The whole block is the hover target — the earlier
+                          version only triggered on the truncated text line
+                          itself, which was a hard target to hit. */}
+                      <ContactHoverCard contact={c}>
+                        <div style={{ flex: "1 1 220px", minWidth: 0, cursor: "default" }}>
                           <div
-                            title={c.notes}
                             style={{
-                              color: C.mute,
-                              fontSize: 11,
-                              opacity: 0.85,
+                              fontWeight: 600,
                               overflow: "hidden",
                               textOverflow: "ellipsis",
                               whiteSpace: "nowrap",
-                              cursor: "help",
                             }}
                           >
-                            {c.notes}
+                            {c.org}
                           </div>
-                        ) : (
-                          c.org && (
-                            <div style={{ color: "#B3541E", fontSize: 11, opacity: 0.75 }}>
-                              설명 없음
+                          {c.person && (
+                            <div style={{ color: C.mute, fontSize: 11 }}>
+                              {c.person}
+                              {c.title ? ` · ${c.title}` : ""}
                             </div>
-                          )
-                        )}
-                      </div>
+                          )}
+                          {c.notes ? (
+                            <div
+                              style={{
+                                color: C.mute,
+                                fontSize: 11,
+                                opacity: 0.85,
+                                overflow: "hidden",
+                                textOverflow: "ellipsis",
+                                whiteSpace: "nowrap",
+                              }}
+                            >
+                              {c.notes}
+                            </div>
+                          ) : (
+                            c.org && (
+                              <div style={{ color: "#B3541E", fontSize: 11, opacity: 0.75 }}>
+                                설명 없음
+                              </div>
+                            )
+                          )}
+                        </div>
+                      </ContactHoverCard>
                       <div
                         style={{
                           flex: "1 1 220px",
@@ -2971,7 +3298,7 @@ BODY:
                 <div>
                   <div
                     style={{
-                      fontFamily: "Archivo, sans-serif",
+                      fontFamily: "'Schibsted Grotesk', sans-serif",
                       fontWeight: 700,
                       fontSize: 13,
                       color: C.pine,
@@ -4311,8 +4638,8 @@ BODY:
                       fontSize: 11,
                       color: C.mute,
                       padding: "7px 9px",
-                      background: C.bg,
-                      borderRadius: 3,
+                      background: "#EEF2F5",
+                      borderRadius: 6,
                       marginBottom: 6,
                       overflow: "hidden",
                       textOverflow: "ellipsis",
