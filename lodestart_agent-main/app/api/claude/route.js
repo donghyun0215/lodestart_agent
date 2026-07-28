@@ -18,6 +18,22 @@ export async function POST(req) {
         model: body.model || "claude-sonnet-4-6",
         max_tokens: body.max_tokens || 1200,
         messages: body.messages,
+        // Matching sends the same instructions + startup profile on every one
+        // of ~70 batches per run. Marking that fixed part as a cached system
+        // block means only the first call pays full price; every call after
+        // reads it at 1/10th cost. The part that actually changes per call
+        // (the contact list) stays in `messages`, never cached.
+        ...(body.system
+          ? {
+              system: [
+                {
+                  type: "text",
+                  text: body.system,
+                  cache_control: { type: "ephemeral" },
+                },
+              ],
+            }
+          : {}),
         // Only the note-enrichment job asks for this. Everything else (matching,
         // drafting) stays search-free so it remains fast and cheap — the model
         // is told to work from the profile and the stored notes, not the web.

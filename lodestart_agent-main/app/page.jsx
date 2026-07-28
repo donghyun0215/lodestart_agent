@@ -226,6 +226,41 @@ async function claude(prompt, maxTokens = 1000, tries = 0) {
     .join("\n");
 }
 
+// Used only for match scoring. Two cost changes from claude():
+// 1. Model is Haiku instead of Sonnet — matching is a structured 0-100 +
+//    one-sentence-reason classification task, not prose generation, so the
+//    quality bar it needs is well within Haiku's range. Drafting (the actual
+//    client-facing email) stays on Sonnet.
+// 2. The instructions + startup profile + audience framing (identical across
+//    every batch in a run — ~70 batches for the VC pool) go in `system` with
+//    caching on, so only the first call per run pays full input price; every
+//    call after reads that block at 1/10th cost. Only the part that changes
+//    per call — this batch's 20 contacts — goes in the user message.
+async function claudeMatch(systemPrompt, userPrompt, maxTokens = 1600, tries = 0) {
+  const res = await fetch("/api/claude", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      model: "claude-haiku-4-5-20251001",
+      max_tokens: maxTokens,
+      system: systemPrompt,
+      messages: [{ role: "user", content: userPrompt }],
+    }),
+  });
+  if ((res.status === 429 || res.status === 529) && tries < 5) {
+    const wait = 2000 * Math.pow(2, tries);
+    await new Promise((r) => setTimeout(r, wait));
+    return claudeMatch(systemPrompt, userPrompt, maxTokens, tries + 1);
+  }
+  if (!res.ok) throw new Error(`API ${res.status}`);
+  const data = await res.json();
+  reportUsage(data.usage);
+  return data.content
+    .filter((b) => b.type === "text")
+    .map((b) => b.text)
+    .join("\n");
+}
+
 // Same as claude(), but lets the model look things up on the web. Used only
 // by the note-enrichment job — matching and drafting stay search-free.
 async function claudeSearch(prompt, maxTokens = 2000, maxSearches = 4, tries = 0) {
@@ -929,7 +964,11 @@ export default function App() {
     setDbNote("");
     setProgress(0);
 
-    const BATCH = 8;      // companies per call
+    // 8 companies sharing only 4 searches meant well-known names ate the
+    // budget and small/foreign firms near the end of a batch got skipped
+    // silently. Smaller batches with a search-per-company budget fix that —
+    // more calls overall, but far fewer contacts left unresearched.
+    const BATCH = 4;      // companies per call
     const CONCURRENCY = 3;
     const batches = [];
     for (let i = 0; i < targets.length; i += BATCH)
@@ -937,7 +976,8 @@ export default function App() {
 
     let done = 0;
     let filled = 0;
-    let skipped = 0;
+    let notFound = 0; // searched, genuinely nothing reliable
+    let failed = 0;   // batch errored out (rate limit, parse failure) — retry by re-running
 
     const runBatch = async (chunk) => {
       // Only the company name and country go out — no person names, no email
@@ -961,9 +1001,13 @@ Return ONLY a JSON array, no prose, no markdown:
 
       let parsed = [];
       try {
-        parsed = parseJSON(await claudeSearch(prompt, 2000, 4));
+        // Budget scales with batch size (was a flat 4 regardless of how many
+        // companies were in the batch) so every company actually gets looked
+        // up rather than the last few in a batch silently going unsearched.
+        parsed = parseJSON(await claudeSearch(prompt, 2000, chunk.length * 2));
       } catch {
-        return; // a failed batch just stays empty and can be retried later
+        failed += chunk.length;
+        return; // stays empty and is picked up automatically on the next run
       }
 
       const updates = [];
@@ -972,7 +1016,7 @@ Return ONLY a JSON array, no prose, no markdown:
         const desc = String(r.desc || "").trim();
         if (!c) return;
         if (!desc) {
-          skipped += 1;
+          notFound += 1;
           return;
         }
         updates.push({ id: c.id, notes: desc });
@@ -1006,8 +1050,11 @@ Return ONLY a JSON array, no prose, no markdown:
       }
       setDbNote(
         `회사 설명 ${filled}건을 채웠습니다.` +
-          (skipped
-            ? ` ${skipped}건은 확실한 정보를 찾지 못해 비워뒀습니다 — 추측으로 채우지 않았습니다.`
+          (notFound
+            ? ` ${notFound}건은 확실한 정보를 찾지 못해 비워뒀습니다 — 추측으로 채우지 않았습니다.`
+            : "") +
+          (failed
+            ? ` ${failed}건은 호출 오류로 시도조차 못 했습니다 — 버튼을 다시 누르면 이 건들만 자동으로 재시도됩니다.`
             : "")
       );
     } catch (e) {
@@ -1249,13 +1296,11 @@ Return ONLY a JSON array, no prose, no markdown:
     for (let i = 0; i < pool.length; i += BATCH) batches.push(pool.slice(i, i + BATCH));
 
     const scoreBatch = async (chunk, target) => {
-      const list = chunk
-        .map(
-          (c, j) =>
-            `${j}. org="${c.org}" | person="${c.person}" | title="${c.title}" | country="${c.country}" | note="${c.notes}"`
-        )
-        .join("\n");
-      const prompt = `You are screening outreach targets for a Korean startup entering Singapore.
+      // Fixed across every batch for this target+audience (~70 batches for
+      // the VC pool) — recomputing the string here is free (local JS), and
+      // caching happens Anthropic-side on the actual bytes sent, so this
+      // still hits cache as long as `target` and `audience` don't change.
+      const systemPrompt = `You are screening outreach targets for a Korean startup entering Singapore.
 
 ${profileTextFor(target)}
 
@@ -1266,13 +1311,18 @@ Score each contact 0-100 for how likely they are to actually care about this sta
 Be harsh. Most cold contacts deserve 20-50. Reserve 80+ for a genuinely specific fit.
 If the contact's org has no plausible connection to this startup, score it low and say so.
 
-CONTACTS:
-${list}
-
 Return ONLY a JSON array, no prose, no markdown:
 [{"i":0,"score":72,"reason":"one specific sentence, max 18 words, naming the actual overlap"}]
 Inside "reason" use only plain text — no double quotes, no line breaks, no colons.`;
-      const out = await claude(prompt, 1600);
+
+      const list = chunk
+        .map(
+          (c, j) =>
+            `${j}. org="${c.org}" | person="${c.person}" | title="${c.title}" | country="${c.country}" | note="${c.notes}"`
+        )
+        .join("\n");
+      const userPrompt = `CONTACTS:\n${list}`;
+      const out = await claudeMatch(systemPrompt, userPrompt, 1600);
       parseJSON(out).forEach((r) => {
         const c = chunk[r.i];
         if (!c) return;
@@ -2447,9 +2497,9 @@ BODY:
                 {(() => {
                   const empty = filteredContacts.filter((c) => !c.notes && c.org);
                   if (!empty.length) return null;
-                  // Rough cost signal so this is never a surprise: ~8 companies
-                  // per search-enabled call, a few searches each.
-                  const batches = Math.ceil(empty.length / 8);
+                  // 4 companies per call, ~2 searches each — matches the
+                  // actual budget in enrichNotes() below.
+                  const batches = Math.ceil(empty.length / 4);
                   return (
                     <div
                       style={{
