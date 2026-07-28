@@ -95,6 +95,7 @@ const TYPE_OPTIONS = [
   "INSTITUTION",
   "AGENCY",
   "INTERMEDIARY",
+  "PERSONAL_NETWORK",
   "TEST",
 ];
 
@@ -576,6 +577,7 @@ export default function App() {
   const [coherence, setCoherence] = useState({}); // contactId -> { ok, reason }
 
   const [audience, setAudience] = useState("CORPORATE_KR");
+  const [extraTypes, setExtraTypes] = useState([]); // raw types layered on top of the audience's default pool (e.g. PERSONAL_NETWORK)
   const [limit, setLimit] = useState("15"); // free text while typing — validated on run, not per keystroke
   const limitNum = parseInt(limit, 10);
   const [lang, setLang] = useState("EN"); // EN | KO
@@ -727,6 +729,7 @@ export default function App() {
         if (p.audience) setAudience(p.audience);
         if (p.lang) setLang(p.lang);
         if (p.tab) setTab(p.tab);
+        if (Array.isArray(p.extraTypes)) setExtraTypes(p.extraTypes);
       }
       setReady(true);
     })();
@@ -746,8 +749,8 @@ export default function App() {
   // (and so the campaign-restore effect below knows where to look).
   useEffect(() => {
     if (!ready) return;
-    saveKey(K.prefs, { audience, lang, tab });
-  }, [ready, audience, lang, tab]);
+    saveKey(K.prefs, { audience, lang, tab, extraTypes });
+  }, [ready, audience, lang, tab, extraTypes]);
 
   // Restore a previous campaign's matches/drafts/statuses from the DB when
   // landing on a startup+audience that already has saved work. Without
@@ -1155,20 +1158,21 @@ Return ONLY a JSON array, no prose, no markdown:
     });
   }, [contacts, contactQuery, contactTypeFilter]);
 
+  // Which raw contact `type`s an audience covers by default. Kept separate
+  // from the pool filter below so extra types (e.g. PERSONAL_NETWORK) can be
+  // layered on top of whichever audience framing (goal/hint/cta) is active,
+  // without having to invent a new audience bucket for every combination.
+  const baseTypesFor = (aud) => {
+    if (aud === "TEST") return ["TEST"];
+    if (aud === "VC") return TYPE_OPTIONS.filter((t) => t.startsWith("VC"));
+    if (aud === "CORPORATE_KR") return ["CORPORATE_KR"];
+    return ["ACCELERATOR", "INSTITUTION", "AGENCY", "INTERMEDIARY"];
+  };
+
   const pool = useMemo(() => {
-    if (audience === "TEST") return contacts.filter((c) => c.type === "TEST");
-    if (audience === "VC")
-      return contacts.filter((c) => c.type.startsWith("VC") && c.type !== "TEST");
-    if (audience === "CORPORATE_KR")
-      return contacts.filter((c) => c.type === "CORPORATE_KR");
-    return contacts.filter(
-      (c) =>
-        c.type === "ACCELERATOR" ||
-        c.type === "INSTITUTION" ||
-        c.type === "AGENCY" ||
-        c.type === "INTERMEDIARY"
-    );
-  }, [contacts, audience]);
+    const active = new Set([...baseTypesFor(audience), ...extraTypes]);
+    return contacts.filter((c) => active.has(c.type));
+  }, [contacts, audience, extraTypes]);
 
   const scored = useMemo(
     () =>
@@ -2419,6 +2423,49 @@ BODY:
                   </div>
                 </div>
 
+                {/* Matching reads the stored company description and nothing
+                    else — an empty one means that contact is scored on its
+                    name alone. Scoped to whatever the type filter narrows to,
+                    so a batch like PERSONAL_NETWORK can be enriched on its
+                    own instead of accidentally kicking off a run over
+                    everything. */}
+                {(() => {
+                  const empty = filteredContacts.filter((c) => !c.notes && c.org);
+                  if (!empty.length) return null;
+                  // Rough cost signal so this is never a surprise: ~8 companies
+                  // per search-enabled call, a few searches each.
+                  const batches = Math.ceil(empty.length / 8);
+                  return (
+                    <div
+                      style={{
+                        display: "flex",
+                        alignItems: "center",
+                        gap: 10,
+                        flexWrap: "wrap",
+                        padding: "10px 16px",
+                        borderBottom: `1px solid ${C.line}`,
+                        background: "#FBEAD9",
+                        fontSize: 12,
+                        color: "#B3541E",
+                      }}
+                    >
+                      <span style={{ flex: 1, minWidth: 240, lineHeight: 1.6 }}>
+                        현재 필터의 <b>{empty.length.toLocaleString()}건</b>은 회사 설명이
+                        비어 있습니다 (매칭 근거로 쓰이는 필드). 웹 검색으로 채울 수 있지만
+                        토큰 비용이 듭니다 — 약 {batches}회 검색 호출.
+                        {contactTypeFilter === "ALL" && (
+                          <> 먼저 유형 필터로 좁혀서 소량으로 시도해보길 권장합니다.</>
+                        )}
+                      </span>
+                      <Btn small onClick={enrichNotes} disabled={!!busy}>
+                        {busy === "enrich"
+                          ? `조사 중… ${progress}%`
+                          : `웹에서 조사해 채우기 (${empty.length.toLocaleString()}건)`}
+                      </Btn>
+                    </div>
+                  );
+                })()}
+
                 <div style={{ maxHeight: 460, overflowY: "auto" }}>
                   {filteredContacts.slice(0, 300).map((c) => (
                     <div
@@ -3060,21 +3107,15 @@ BODY:
                 수신자 유형
               </div>
               {Object.entries(AUDIENCES).map(([k, a]) => {
-                const n = contacts.filter((c) =>
-                  k === "TEST"
-                    ? c.type === "TEST"
-                    : k === "VC"
-                    ? c.type.startsWith("VC") && c.type !== "TEST"
-                    : k === "CORPORATE_KR"
-                    ? c.type === "CORPORATE_KR"
-                    : ["ACCELERATOR", "INSTITUTION", "AGENCY", "INTERMEDIARY"].includes(c.type)
-                ).length;
+                const types = baseTypesFor(k);
+                const n = contacts.filter((c) => types.includes(c.type)).length;
                 const on = audience === k;
                 return (
                   <button
                     key={k}
                     onClick={() => {
                       setAudience(k);
+                      setExtraTypes([]);
                       setLang(k === "CORPORATE_KR" ? "KO" : "EN");
                       setScores({});
                       setDrafts({});
@@ -3117,6 +3158,63 @@ BODY:
                   </button>
                 );
               })}
+
+              {/* Audience picks the messaging framing (goal/hint/cta) and the
+                  types it defaults to. These checkboxes let extra contact
+                  types ride along in the SAME campaign without inventing a
+                  new audience bucket for every combination — e.g. sending
+                  the CORPORATE_KR-framed email to PERSONAL_NETWORK contacts
+                  too. TEST is excluded here; it stays an isolated sandbox. */}
+              {(() => {
+                const base = baseTypesFor(audience);
+                const extra = TYPE_OPTIONS.filter(
+                  (t) => t !== "TEST" && !base.includes(t)
+                );
+                if (!extra.length) return null;
+                return (
+                  <div
+                    style={{
+                      marginTop: 4,
+                      marginBottom: 4,
+                      padding: "10px 12px",
+                      border: `1px solid ${C.line}`,
+                      borderRadius: 4,
+                    }}
+                  >
+                    <div style={{ fontSize: 11, color: C.mute, marginBottom: 8 }}>
+                      + 추가로 포함할 유형 (여러 개 선택 가능)
+                    </div>
+                    <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
+                      {extra.map((t) => {
+                        const n = contacts.filter((c) => c.type === t).length;
+                        const on = extraTypes.includes(t);
+                        return (
+                          <button
+                            key={t}
+                            onClick={() =>
+                              setExtraTypes((prev) =>
+                                on ? prev.filter((x) => x !== t) : [...prev, t]
+                              )
+                            }
+                            style={{
+                              fontSize: 11.5,
+                              padding: "5px 10px",
+                              borderRadius: 4,
+                              border: `1px solid ${on ? C.pine : C.line}`,
+                              background: on ? C.pineSoft : C.surface,
+                              color: on ? C.pine : C.ink,
+                              fontWeight: on ? 600 : 400,
+                              cursor: "pointer",
+                            }}
+                          >
+                            {t} ({n})
+                          </button>
+                        );
+                      })}
+                    </div>
+                  </div>
+                );
+              })()}
 
               <div style={{ marginTop: 16 }}>
                 <Field
