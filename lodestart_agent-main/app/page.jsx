@@ -186,6 +186,21 @@ function reportUsage(u) {
   if (onUsage && u) onUsage(u);
 }
 
+// Display-only masking. The contact list holds home addresses' worth of
+// sensitivity — company owners, government officials — so the email address
+// itself should not sit in plain view on screen. This never touches what's
+// stored or what's actually sent: search, CSV export, copy-to-clipboard,
+// mailto:, and the Gmail API calls all still use the real address. Only the
+// on-screen text is altered.
+function maskEmail(email) {
+  if (!email) return "";
+  const at = email.indexOf("@");
+  if (at <= 0) return email;
+  const local = email.slice(0, at);
+  const domain = email.slice(at);
+  return local[0] + "x".repeat(Math.max(local.length - 1, 3)) + domain;
+}
+
 async function claude(prompt, maxTokens = 1000, tries = 0) {
   const res = await fetch("/api/claude", {
     method: "POST",
@@ -2529,7 +2544,7 @@ BODY:
                           whiteSpace: "nowrap",
                         }}
                       >
-                        {c.email}
+                        {maskEmail(c.email)}
                       </div>
                       <div style={{ width: 70, flexShrink: 0, color: C.mute, fontSize: 11 }}>
                         {c.country}
@@ -2645,7 +2660,7 @@ BODY:
                                 color: C.mute,
                               }}
                             >
-                              {c.email}
+                              {maskEmail(c.email)}
                             </div>
                           </div>
                         </div>
@@ -3454,7 +3469,7 @@ BODY:
                       color: C.mute,
                     }}
                   >
-                    {c.email}
+                    {maskEmail(c.email)}
                   </div>
                   <button
                     onClick={() => pinContact(c.id)}
@@ -3699,7 +3714,7 @@ BODY:
                             whiteSpace: "nowrap",
                           }}
                         >
-                          {c.email} · {d.subject}
+                          {maskEmail(c.email)} · {d.subject}
                         </div>
                       </div>
                       {d.edited && (
@@ -4076,7 +4091,7 @@ BODY:
                                 color: C.mute,
                               }}
                             >
-                              {c.email}
+                              {maskEmail(c.email)}
                             </div>
                           </div>
                           {gmailDraftIds[c.id] &&
