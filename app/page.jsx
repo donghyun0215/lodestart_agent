@@ -1447,9 +1447,23 @@ Return ONLY a JSON array, no prose, no markdown:
     return ["ACCELERATOR", "INSTITUTION", "AGENCY", "INTERMEDIARY"];
   };
 
+  // Contacts with no company name are excluded from outreach entirely — not
+  // just scored low. Tammy's requirement (2026-07-31): a row that is only an
+  // email address must never be cold-mailed. Matching has nothing to reason
+  // about without an org anyway, and a chamber-of-commerce email that can't
+  // name the recipient's company reads as spam. They stay in the DB and in
+  // the contacts tab, where the missing org can be filled in to re-include
+  // them.
   const pool = useMemo(() => {
     const active = new Set([...baseTypesFor(audience), ...extraTypes]);
-    return contacts.filter((c) => active.has(c.type));
+    return contacts.filter((c) => active.has(c.type) && (c.org || "").trim());
+  }, [contacts, audience, extraTypes]);
+
+  // Shown in the campaign UI so the exclusion is visible, not silent.
+  const orglessCount = useMemo(() => {
+    const active = new Set([...baseTypesFor(audience), ...extraTypes]);
+    return contacts.filter((c) => active.has(c.type) && !(c.org || "").trim())
+      .length;
   }, [contacts, audience, extraTypes]);
 
   const scored = useMemo(
@@ -3694,6 +3708,12 @@ BODY:
               {allStartups.length > 1 && (
                 <div style={{ fontSize: 11, color: C.mute, marginTop: 8 }}>
                   스타트업마다 따로 채점합니다 — 시간이 스타트업 수만큼 늘어납니다.
+                </div>
+              )}
+              {orglessCount > 0 && (
+                <div style={{ fontSize: 11, color: C.mute, marginTop: 8, lineHeight: 1.6 }}>
+                  회사명이 없는 {orglessCount.toLocaleString()}건은 발송 대상에서
+                  제외되어 있습니다. 컨택 탭에서 회사명을 채우면 다시 포함됩니다.
                 </div>
               )}
               {!pool.length && (
