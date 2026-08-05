@@ -13,6 +13,7 @@ import {
   Mail,
   Send,
   FileUp,
+  Link as LinkIcon,
   Check,
   X,
   Loader2,
@@ -92,19 +93,19 @@ const C = {
 
 const AUDIENCES = {
   VC: {
-    label: "투자자 (VC)",
+    label: "투자 유치",
     goal: "소개 미팅 / 투자 검토",
     hint: "펀드의 투자 테제, 스테이지, 섹터, 지역 포커스와의 적합도",
     cta: "Would you be open to a short intro call?",
   },
   CORPORATE_KR: {
-    label: "대기업 (PoC 발주)",
+    label: "PoC 발주 · 영업",
     goal: "PoC / 파일럿 제안",
     hint: "그 회사의 실제 사업/운영에서 이 기술이 풀 수 있는 구체적 문제",
     cta: "Could we explore a short PoC scoped to your operations?",
   },
   INSTITUTION: {
-    label: "기관 (오픈이노베이션)",
+    label: "기관 OIP 연계",
     goal: "챌린지 참여 / 프로그램 연계",
     hint: "기관의 오픈이노베이션 챌린지·프로그램 주제와의 연결고리",
     cta: "Is there an upcoming challenge or programme this could fit?",
@@ -139,8 +140,7 @@ const TYPE_OPTIONS = [
   "ACCELERATOR",
   "INSTITUTION",
   "AGENCY",
-  "INTERMEDIARY",
-  "PERSONAL_NETWORK",
+  "REMEMBER",
   "TEST",
 ];
 
@@ -248,8 +248,136 @@ function reportUsage(u) {
 // stored or what's actually sent: search, CSV export, copy-to-clipboard,
 // mailto:, and the Gmail API calls all still use the real address. Only the
 // on-screen text is altered.
-function maskEmail(email) {
+// One import box used by every startup slot (primary and extras alike) so
+// the three of them look and behave identically: drop a PDF/image, or paste
+// the URL of an already-deployed one-pager page.
+function DeckImport({ busy, busyKey, onFile, onUrl, compact }) {
+  const [url, setUrl] = React.useState("");
+  const working = busy === busyKey;
+  const go = () => {
+    if (!url.trim() || busy) return;
+    onUrl(url);
+    setUrl("");
+  };
+  return (
+    <div style={{ marginBottom: compact ? 12 : 18 }}>
+      <label
+        style={{
+          display: "flex",
+          alignItems: "center",
+          gap: 12,
+          border: `1.5px dashed ${working ? C.pine : C.line}`,
+          borderRadius: "8px 8px 0 0",
+          padding: compact ? "11px 14px" : "14px 16px",
+          cursor: busy ? "default" : "pointer",
+          background: working ? C.pineSoft : "#FAFBFC",
+          transition: "all .15s",
+        }}
+      >
+        <div
+          style={{
+            width: compact ? 30 : 34,
+            height: compact ? 30 : 34,
+            borderRadius: 7,
+            background: working ? "#fff" : C.pineSoft,
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            flexShrink: 0,
+          }}
+        >
+          {working ? (
+            <Loader2 size={compact ? 15 : 17} color={C.pine} className="spin" />
+          ) : (
+            <FileUp size={compact ? 15 : 17} color={C.pine} />
+          )}
+        </div>
+        <div style={{ minWidth: 0 }}>
+          <div
+            style={{
+              fontFamily: "'Schibsted Grotesk', sans-serif",
+              fontWeight: 700,
+              fontSize: compact ? 12 : 13,
+              color: C.pine,
+            }}
+          >
+            {working ? "IR 자료 읽는 중…" : "IR 자료 업로드 (PDF/이미지)"}
+          </div>
+          <div style={{ fontSize: 11, color: C.mute, marginTop: 1 }}>
+            {working
+              ? "잠시만요, 아래 항목을 자동으로 채웁니다"
+              : "던져주면 아래 항목을 자동으로 채웁니다 · 검토 후 수정하세요"}
+          </div>
+        </div>
+        <input
+          type="file"
+          accept=".pdf,image/*"
+          disabled={!!busy}
+          onChange={onFile}
+          style={{ display: "none" }}
+        />
+      </label>
+      {/* link-paste rail, joined to the box so it reads as one control */}
+      <div
+        style={{
+          display: "flex",
+          gap: 8,
+          alignItems: "center",
+          border: `1px solid ${C.line}`,
+          borderTop: "none",
+          borderRadius: "0 0 8px 8px",
+          padding: compact ? "7px 10px" : "8px 12px",
+          background: "#FFFFFF",
+        }}
+      >
+        <LinkIcon size={13} color={C.mute} style={{ flexShrink: 0 }} />
+        <input
+          value={url}
+          onChange={(e) => setUrl(e.target.value)}
+          onKeyDown={(e) => e.key === "Enter" && go()}
+          placeholder="또는 배포된 원페이저 링크 붙여넣기 (https://…)"
+          disabled={!!busy}
+          style={{
+            flex: 1,
+            minWidth: 0,
+            border: "none",
+            outline: "none",
+            fontSize: 12,
+            fontFamily: "Inter, sans-serif",
+            color: C.ink,
+            background: "transparent",
+            boxShadow: "none",
+          }}
+        />
+        <button
+          onClick={go}
+          disabled={!!busy || !url.trim()}
+          style={{
+            flexShrink: 0,
+            border: `1px solid ${url.trim() && !busy ? C.pine : C.line}`,
+            background: url.trim() && !busy ? C.pineSoft : "transparent",
+            color: url.trim() && !busy ? C.pine : C.mute,
+            borderRadius: 6,
+            padding: "4px 10px",
+            fontSize: 11.5,
+            fontWeight: 600,
+            cursor: url.trim() && !busy ? "pointer" : "default",
+          }}
+        >
+          읽어오기
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function maskEmail(email, staff = false) {
   if (!email) return "";
+  // Staff (lodestart.ai Gmail login, verified server-side by /api/auth/status)
+  // see the real address — the masking exists to keep the contact book from
+  // being readable over a shoulder or by someone who shouldn't have it, not
+  // to slow down the people whose job is to use it.
+  if (staff) return email;
   const at = email.indexOf("@");
   if (at <= 0) return email;
   const local = email.slice(0, at);
@@ -268,7 +396,7 @@ function maskEmail(email) {
 // out of the scroll container so the card isn't clipped, flipping/shifting
 // when near a viewport edge, and open/close timing that doesn't flicker when
 // the pointer crosses between rows.
-function ContactHoverCard({ contact, children }) {
+function ContactHoverCard({ contact, staff, children }) {
   const c = contact;
   const hasNote = !!(c.notes || "").trim();
   return (
@@ -374,7 +502,7 @@ function ContactHoverCard({ contact, children }) {
               color: C.mute,
             }}
           >
-            <span>{maskEmail(c.email)}</span>
+            <span>{maskEmail(c.email, staff)}</span>
             {c.country && <span>· {c.country}</span>}
           </div>
 
@@ -829,7 +957,7 @@ export default function App() {
   const [coherence, setCoherence] = useState({}); // contactId -> { ok, reason }
 
   const [audience, setAudience] = useState("CORPORATE_KR");
-  const [extraTypes, setExtraTypes] = useState([]); // raw types layered on top of the audience's default pool (e.g. PERSONAL_NETWORK)
+  const [extraTypes, setExtraTypes] = useState([]); // raw types layered on top of the audience's default pool (e.g. REMEMBER)
   const [limit, setLimit] = useState("15"); // free text while typing — validated on run, not per keystroke
   const limitNum = parseInt(limit, 10);
   const [lang, setLang] = useState("EN"); // EN | KO
@@ -981,7 +1109,12 @@ export default function App() {
         if (p.audience) setAudience(p.audience);
         if (p.lang) setLang(p.lang);
         if (p.tab) setTab(p.tab);
-        if (Array.isArray(p.extraTypes)) setExtraTypes(p.extraTypes);
+        if (Array.isArray(p.extraTypes))
+          setExtraTypes(
+            p.extraTypes.map((t) =>
+              t === "PERSONAL_NETWORK" ? "REMEMBER" : t === "INTERMEDIARY" ? "AGENCY" : t
+            )
+          );
       }
       setReady(true);
     })();
@@ -1348,12 +1481,15 @@ Return ONLY a JSON array, no prose, no markdown:
             person: (x.person || "").trim(),
             title: (x.title || "").trim(),
             country: (x.country || "").trim(),
-            // Legacy exports still carry the old split — fold it back in on
-            // the way in so an old CSV can't undo the merge.
-            type:
-              (x.type || "").trim() === "VC_CRYPTO_LIST"
-                ? "VC"
-                : (x.type || "").trim(),
+            // Legacy exports still carry old names — normalise on the way in
+            // so re-uploading an old CSV can't undo a rename/merge.
+            type: (() => {
+              const t = (x.type || "").trim();
+              if (t === "VC_CRYPTO_LIST") return "VC";
+              if (t === "PERSONAL_NETWORK") return "REMEMBER";
+              if (t === "INTERMEDIARY") return "AGENCY";
+              return t;
+            })(),
             notes: (x.notes || "").trim(),
             sendable: (x.sendable || "YES").trim() || "YES",
           }))
@@ -1386,6 +1522,54 @@ Return ONLY a JSON array, no prose, no markdown:
   };
 
   /* --------------------- IR deck -> autofill profile ------------------- */
+  // Merge extracted fields into a profile without wiping anything the model
+  // failed to find — an empty extraction result never erases typed text.
+  const mergeExtract = (j, prev) => ({
+    ...prev,
+    name: j.name || prev.name,
+    oneLiner: j.oneLiner || prev.oneLiner,
+    sector: j.sector || prev.sector,
+    tech: j.tech || prev.tech,
+    traction: j.traction || prev.traction,
+    ask: j.ask || prev.ask,
+    link: j.link || prev.link,
+  });
+
+  // Paste-a-link variant of the deck import: a deployed one-pager page is
+  // fetched server-side (CORS), reduced to text, and run through the same
+  // extraction prompt the PDF path uses. slot === -1 targets the primary
+  // profile; 0..n targets an extra slot.
+  const onDeckUrl = async (url, slot) => {
+    const u = (url || "").trim();
+    if (!u) return;
+    setErr("");
+    const busyKey = slot < 0 ? "extract" : `extract${slot}`;
+    setBusy(busyKey);
+    try {
+      const res = await fetch("/api/fetch-page", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ url: u }),
+      });
+      const j0 = await res.json();
+      if (!res.ok) throw new Error(j0.error || `HTTP ${res.status}`);
+      const out = await claude(
+        `${DECK_PROMPT}\n\nThe startup one-pager below was extracted from a web page (${u}). Same JSON output as specified above.\n\n---\n${j0.text}`,
+        1500
+      );
+      const j = parseJSON(out);
+      if (!j.link) j.link = u; // the pasted URL is itself the best link
+      if (slot < 0) setStartup((prev) => mergeExtract(j, prev));
+      else
+        setExtraStartups((prev) =>
+          prev.map((t, x) => (x === slot ? mergeExtract(j, t) : t))
+        );
+    } catch (e2) {
+      setErr("링크 추출 실패: " + e2.message);
+    }
+    setBusy("");
+  };
+
   const onDeck = async (e) => {
     const f = e.target.files?.[0];
     if (!f) return;
@@ -1407,15 +1591,7 @@ Return ONLY a JSON array, no prose, no markdown:
 
       const out = await claudeWithDoc(source, prompt, 1500);
       const j = parseJSON(out);
-      setStartup((prev) => ({
-        name: j.name || prev.name,
-        oneLiner: j.oneLiner || prev.oneLiner,
-        sector: j.sector || prev.sector,
-        tech: j.tech || prev.tech,
-        traction: j.traction || prev.traction,
-        ask: j.ask || prev.ask,
-        link: j.link || prev.link,
-      }));
+      setStartup((prev) => mergeExtract(j, prev));
     } catch (e2) {
       setErr("IR 추출 실패: " + e2.message + " — 직접 입력하거나 다른 파일을 시도하세요.");
     }
@@ -1437,14 +1613,14 @@ Return ONLY a JSON array, no prose, no markdown:
   }, [contacts, contactQuery, contactTypeFilter]);
 
   // Which raw contact `type`s an audience covers by default. Kept separate
-  // from the pool filter below so extra types (e.g. PERSONAL_NETWORK) can be
+  // from the pool filter below so extra types (e.g. REMEMBER) can be
   // layered on top of whichever audience framing (goal/hint/cta) is active,
   // without having to invent a new audience bucket for every combination.
   const baseTypesFor = (aud) => {
     if (aud === "TEST") return ["TEST"];
     if (aud === "VC") return TYPE_OPTIONS.filter((t) => t.startsWith("VC"));
     if (aud === "CORPORATE_KR") return ["CORPORATE_KR"];
-    return ["ACCELERATOR", "INSTITUTION", "AGENCY", "INTERMEDIARY"];
+    return ["ACCELERATOR", "INSTITUTION", "AGENCY"];
   };
 
   // Contacts with no company name are excluded from outreach entirely — not
@@ -2000,15 +2176,9 @@ BODY:
         : { kind: "image", media_type: f.type, data };
       const out = await claudeWithDoc(source, DECK_PROMPT, 1500);
       const j = parseJSON(out);
-      updateExtra(k, {
-        name: j.name || "",
-        oneLiner: j.oneLiner || "",
-        sector: j.sector || "",
-        tech: j.tech || "",
-        traction: j.traction || "",
-        ask: j.ask || "",
-        link: j.link || "",
-      });
+      setExtraStartups((prev) =>
+        prev.map((t, x) => (x === k ? mergeExtract(j, t) : t))
+      );
     } catch (e2) {
       setErr("IR 추출 실패: " + e2.message + " — 직접 입력하거나 다른 파일을 시도하세요.");
     }
@@ -2855,7 +3025,7 @@ BODY:
                 {/* Matching reads the stored company description and nothing
                     else — an empty one means that contact is scored on its
                     name alone. Scoped to whatever the type filter narrows to,
-                    so a batch like PERSONAL_NETWORK can be enriched on its
+                    so a batch like REMEMBER can be enriched on its
                     own instead of accidentally kicking off a run over
                     everything. */}
                 {(() => {
@@ -2942,7 +3112,7 @@ BODY:
                           The whole block is the hover target — the earlier
                           version only triggered on the truncated text line
                           itself, which was a hard target to hit. */}
-                      <ContactHoverCard contact={c}>
+                      <ContactHoverCard contact={c} staff={account.staff}>
                         <div style={{ flex: "1 1 220px", minWidth: 0, cursor: "default" }}>
                           <div
                             style={{
@@ -2994,11 +3164,32 @@ BODY:
                           whiteSpace: "nowrap",
                         }}
                       >
-                        {maskEmail(c.email)}
+                        {maskEmail(c.email, account.staff)}
                       </div>
                       <div style={{ width: 70, flexShrink: 0, color: C.mute, fontSize: 11 }}>
                         {c.country}
                       </div>
+                      <button
+                        onClick={() =>
+                          window.open(
+                            `https://mail.google.com/mail/?view=cm&fs=1&to=${encodeURIComponent(c.email)}`,
+                            "_blank"
+                          )
+                        }
+                        title="매칭·초안 없이 이 주소로 바로 메일을 씁니다 (Gmail 새 창)"
+                        style={{
+                          flexShrink: 0,
+                          border: `1px solid ${C.line}`,
+                          background: C.surface,
+                          borderRadius: 6,
+                          padding: "4px 8px",
+                          fontSize: 11,
+                          color: C.pine,
+                          cursor: "pointer",
+                        }}
+                      >
+                        메일 쓰기
+                      </button>
                       <button
                         onClick={() =>
                           editingId === c.id
@@ -3110,7 +3301,7 @@ BODY:
                                 color: C.mute,
                               }}
                             >
-                              {maskEmail(c.email)}
+                              {maskEmail(c.email, account.staff)}
                             </div>
                           </div>
                         </div>
@@ -3276,64 +3467,12 @@ BODY:
                 스타트업 프로필
               </H>
 
-              {/* IR deck autofill */}
-              <label
-                style={{
-                  display: "flex",
-                  alignItems: "center",
-                  gap: 12,
-                  border: `1.5px dashed ${busy === "extract" ? C.pine : C.line}`,
-                  borderRadius: 8,
-                  padding: "14px 16px",
-                  marginBottom: 18,
-                  cursor: busy ? "default" : "pointer",
-                  background: busy === "extract" ? C.pineSoft : "#FAFBFC",
-                  transition: "all .15s",
-                }}
-              >
-                <div
-                  style={{
-                    width: 34,
-                    height: 34,
-                    borderRadius: 7,
-                    background: busy === "extract" ? "#fff" : C.pineSoft,
-                    display: "flex",
-                    alignItems: "center",
-                    justifyContent: "center",
-                    flexShrink: 0,
-                  }}
-                >
-                  {busy === "extract" ? (
-                    <Loader2 size={17} color={C.pine} className="spin" />
-                  ) : (
-                    <FileUp size={17} color={C.pine} />
-                  )}
-                </div>
-                <div>
-                  <div
-                    style={{
-                      fontFamily: "'Schibsted Grotesk', sans-serif",
-                      fontWeight: 700,
-                      fontSize: 13,
-                      color: C.pine,
-                    }}
-                  >
-                    {busy === "extract" ? "IR 자료 읽는 중…" : "IR 자료 업로드 (PDF/이미지)"}
-                  </div>
-                  <div style={{ fontSize: 11, color: C.mute, marginTop: 1 }}>
-                    {busy === "extract"
-                      ? "잠시만요, 아래 항목을 자동으로 채웁니다"
-                      : "던져주면 아래 항목을 자동으로 채웁니다 · 검토 후 수정하세요"}
-                  </div>
-                </div>
-                <input
-                  type="file"
-                  accept=".pdf,image/*"
-                  disabled={!!busy}
-                  onChange={onDeck}
-                  style={{ display: "none" }}
-                />
-              </label>
+              <DeckImport
+                busy={busy}
+                busyKey="extract"
+                onFile={onDeck}
+                onUrl={(u) => onDeckUrl(u, -1)}
+              />
 
               <Field
                 label="회사명"
@@ -3423,40 +3562,23 @@ BODY:
                       <div style={{ fontSize: 12, fontWeight: 600, color: C.mute }}>
                         스타트업 {k + 2}
                       </div>
-                      <div style={{ display: "flex", gap: 6 }}>
-                        <label>
-                          <span
-                            style={{
-                              display: "inline-block",
-                              padding: "5px 10px",
-                              border: `1px solid ${C.line}`,
-                              borderRadius: 4,
-                              fontSize: 11,
-                              cursor: busy ? "default" : "pointer",
-                              color: C.mute,
-                            }}
-                          >
-                            {busy === `extract${k}` ? "읽는 중…" : "IR 자료로 자동 채우기"}
-                          </span>
-                          <input
-                            type="file"
-                            accept=".pdf,image/*"
-                            onChange={(e) => onDeckExtra(e, k)}
-                            disabled={!!busy}
-                            style={{ display: "none" }}
-                          />
-                        </label>
-                        <Btn
-                          small
-                          kind="ghost"
-                          onClick={() =>
-                            setExtraStartups(extraStartups.filter((_, x) => x !== k))
-                          }
-                        >
-                          삭제
-                        </Btn>
-                      </div>
+                      <Btn
+                        small
+                        kind="ghost"
+                        onClick={() =>
+                          setExtraStartups(extraStartups.filter((_, x) => x !== k))
+                        }
+                      >
+                        삭제
+                      </Btn>
                     </div>
+                    <DeckImport
+                      compact
+                      busy={busy}
+                      busyKey={`extract${k}`}
+                      onFile={(e) => onDeckExtra(e, k)}
+                      onUrl={(u) => onDeckUrl(u, k)}
+                    />
                     <Field
                       label="이름"
                       value={t.name}
@@ -3569,7 +3691,7 @@ BODY:
                   marginBottom: 7,
                 }}
               >
-                수신자 유형
+                이메일 발송 목적
               </div>
               {Object.entries(AUDIENCES).map(([k, a]) => {
                 const types = baseTypesFor(k);
@@ -3628,7 +3750,7 @@ BODY:
                   types it defaults to. These checkboxes let extra contact
                   types ride along in the SAME campaign without inventing a
                   new audience bucket for every combination — e.g. sending
-                  the CORPORATE_KR-framed email to PERSONAL_NETWORK contacts
+                  the CORPORATE_KR-framed email to REMEMBER contacts
                   too. TEST is excluded here; it stays an isolated sandbox. */}
               {(() => {
                 const base = baseTypesFor(audience);
@@ -3925,7 +4047,7 @@ BODY:
                       color: C.mute,
                     }}
                   >
-                    {maskEmail(c.email)}
+                    {maskEmail(c.email, account.staff)}
                   </div>
                   <button
                     onClick={() => pinContact(c.id)}
@@ -4170,7 +4292,7 @@ BODY:
                             whiteSpace: "nowrap",
                           }}
                         >
-                          {maskEmail(c.email)} · {d.subject}
+                          {maskEmail(c.email, account.staff)} · {d.subject}
                         </div>
                       </div>
                       {d.edited && (
@@ -4547,7 +4669,7 @@ BODY:
                                 color: C.mute,
                               }}
                             >
-                              {maskEmail(c.email)}
+                              {maskEmail(c.email, account.staff)}
                             </div>
                           </div>
                           {gmailDraftIds[c.id] &&
