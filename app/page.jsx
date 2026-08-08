@@ -989,7 +989,7 @@ export default function App() {
   const [editNote, setEditNote] = useState("");
   // Who is signed in via Gmail OAuth, and are they on a Lodestart domain?
   // Server-verified in /api/auth/status — this state is only for the UI.
-  const [account, setAccount] = useState({ email: "", staff: false });
+  const [account, setAccount] = useState({ email: "", staff: false, canDelete: false });
 
   // Find the most recent campaign for this startup+audience, or create one.
   // Campaign identity is (startup name, audience) — regenerating in a
@@ -1089,7 +1089,7 @@ export default function App() {
       .then((r) => r.json())
       .then((d) => {
         if (d.connected) setGmail((prev) => (prev === "error" ? prev : "connected"));
-        setAccount({ email: d.email || "", staff: !!d.staff });
+        setAccount({ email: d.email || "", staff: !!d.staff, canDelete: !!d.canDelete });
       })
       .catch(() => {});
   }, []);
@@ -1261,6 +1261,35 @@ export default function App() {
       await loadContacts();
     } catch (e) {
       setDbNote("추가 실패: " + e.message);
+    }
+    setBusy("");
+  };
+
+  // Permanently remove a contact from the DB. Server-verified allowlist
+  // (Tammy + Donghyun by default) — the button below is hidden for everyone
+  // else, but the route re-checks regardless.
+  const deleteContact = async (c) => {
+    if (
+      !window.confirm(
+        `"${c.org || c.email}" 컨택을 DB에서 완전히 삭제합니다.\n되돌릴 수 없습니다. 계속할까요?\n\n(발송 대상에서만 빼려면 삭제 대신 매칭 결과의 X 버튼을 쓰세요.)`
+      )
+    )
+      return;
+    setBusy("contact");
+    try {
+      const res = await fetch("/api/contacts/delete", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ id: c.id }),
+      });
+      const j = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(j.error || `HTTP ${res.status}`);
+      setContacts((prev) => prev.filter((x) => x.id !== c.id));
+      setEditingId(null);
+      setEditRow(null);
+      setDbNote(`"${c.org || c.email}" 컨택을 삭제했습니다.`);
+    } catch (e) {
+      setDbNote("삭제 실패: " + e.message);
     }
     setBusy("");
   };
@@ -3348,6 +3377,18 @@ BODY:
                             >
                               {maskEmail(c.email, account.staff)}
                             </div>
+                            {account.canDelete && (
+                              <div style={{ marginLeft: "auto" }}>
+                                <Btn
+                                  small
+                                  kind="danger"
+                                  onClick={() => deleteContact(c)}
+                                  disabled={!!busy}
+                                >
+                                  DB에서 삭제
+                                </Btn>
+                              </div>
+                            )}
                           </div>
                         </div>
                       )}

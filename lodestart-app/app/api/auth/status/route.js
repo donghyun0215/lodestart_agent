@@ -12,7 +12,7 @@
 // so flipping it in devtools gets you nothing.
 export const runtime = "nodejs";
 
-import { staffDomains, resolveAccount } from "../../../../lib/staff";
+import { staffDomains, resolveAccount, canDelete } from "../../../../lib/staff";
 
 export async function GET(req) {
   const cookie = req.headers.get("cookie") || "";
@@ -20,13 +20,14 @@ export async function GET(req) {
   const hasRefresh = /(?:^|;\s*)g_rt=/.test(cookie);
   const connected = hasAccess || hasRefresh;
   if (!connected) {
-    return Response.json({ connected: false, email: "", staff: false });
+    return Response.json({ connected: false, email: "", staff: false, canDelete: false });
   }
   const acct = await resolveAccount(cookie);
   return Response.json({
     connected: true,
     email: acct.email,
     staff: acct.staff,
+    canDelete: canDelete(acct.email),
     domains: staffDomains(),
   });
 }
