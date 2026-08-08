@@ -141,6 +141,7 @@ const TYPE_OPTIONS = [
   "INSTITUTION",
   "AGENCY",
   "REMEMBER",
+  "EVENT_GUEST", // 행사 게스트·초청자 리스트 (Luma 데모데이, 기보 초청자 등)
   "TEST",
 ];
 
