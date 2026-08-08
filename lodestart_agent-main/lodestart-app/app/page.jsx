@@ -1646,6 +1646,9 @@ Return ONLY a JSON array, no prose, no markdown:
         c.org.toLowerCase().includes(q) ||
         c.person.toLowerCase().includes(q) ||
         c.email.toLowerCase().includes(q) ||
+        // Country added at Tammy's request (2026-08-04) — e.g. "korea" to
+        // pull up every Korean contact, or fixing miscategorised countries.
+        (c.country || "").toLowerCase().includes(q) ||
         c.notes.toLowerCase().includes(q)
       );
     });
@@ -3071,7 +3074,7 @@ BODY:
                     <input
                       value={contactQuery}
                       onChange={(e) => setContactQuery(e.target.value)}
-                      placeholder="회사, 담당자, 이메일로 검색"
+                      placeholder="회사, 담당자, 이메일, 국가로 검색"
                       style={{
                         width: "100%",
                         boxSizing: "border-box",
