@@ -174,7 +174,10 @@ Rules:
 - Keep each field short enough to fit a form input.
 - Write values in the deck's primary language (Korean deck -> Korean values).`;
 
-const MAX_BUNDLE = 3;
+// One email may introduce at most this many startups — an editorial limit,
+// not a technical one; past this it reads as a catalogue, not a considered
+// match. Raised 3 → 4 at Tammy's request (2026-08-04).
+const MAX_BUNDLE = 4;
 
 // A startup must clear this score for a contact before it is eligible to ride
 // along in that contact's email.
@@ -1945,7 +1948,7 @@ IMPORTANT
 
 TONE RULES (follow strictly)
 ${tone.rules}
-- This is a multi-startup email, so the 160-word guidance above does not apply. Aim for 250-320 words and stay dense — no filler sentences.
+- This is a multi-startup email, so the 160-word guidance above does not apply. Aim for 250-320 words for 2-3 startups, up to 380 for 4 — and stay dense, no filler sentences.
 Never use these words: ${tone.banned}
 ${fewShot()}
 
