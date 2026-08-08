@@ -212,6 +212,7 @@ const K = {
   prefs: "ld:prefs", // last audience/lang selected — helps land back on the right view after refresh
   extras: "ld:extras",   // additional startup profiles in a multi-startup campaign
   multi: "ld:multi",     // per-startup scores, kept so a refresh does not lose the bundling
+  excluded: "ld:excluded", // contact ids manually removed from match results — the counterpart to pin
   bundleOff: "ld:bundleOff2", // { [contactId]: [excludedStartupName, ...] } — per-startup, not all-or-nothing
   coherence: "ld:coherence", // { [contactId]: { ok: bool, reason } } — does the qualifying set read as one story?
   draftStartup: "ld:draftStartup", // whatever's currently typed, saved continuously — not just on "저장" click
@@ -957,6 +958,11 @@ export default function App() {
   // needed to change.
   const [multiScores, setMultiScores] = useState({});
   const [bundleOff, setBundleOff] = useState({}); // contactId -> [excluded startup names]
+  // Contacts Tammy has manually removed from the match results — the mirror
+  // of pinContact. Dropping them from `scored` (rather than zeroing the
+  // score) means drafts, CSV export, Gmail push and the dashboard all skip
+  // them with no extra checks anywhere.
+  const [excludedIds, setExcludedIds] = useState([]);
   const [coherence, setCoherence] = useState({}); // contactId -> { ok, reason }
 
   const [audience, setAudience] = useState("CORPORATE_KR");
@@ -1097,6 +1103,7 @@ export default function App() {
       const savedMulti = await loadKey(K.multi, {});
       setMultiScores(savedMulti);
       setBundleOff(await loadKey(K.bundleOff, {}));
+      setExcludedIds(await loadKey(K.excluded, []));
       setCoherence(await loadKey(K.coherence, {}));
       const s = await loadKey(K.startups, []);
       setStartups(s);
@@ -1648,9 +1655,21 @@ Return ONLY a JSON array, no prose, no markdown:
   const scored = useMemo(
     () =>
       pool
-        .filter((c) => scores[c.id])
+        .filter((c) => scores[c.id] && !excludedIds.includes(c.id))
         .sort((a, b) => scores[b.id].score - scores[a.id].score),
-    [pool, scores]
+    [pool, scores, excludedIds]
+  );
+
+  // Excluded contacts that belong to the current pool and have a score —
+  // i.e. the ones that WOULD be in the results above. Shown in a restore
+  // strip so an exclusion is always visible and one click away from undone,
+  // never a silent disappearance.
+  const excludedScored = useMemo(
+    () =>
+      pool
+        .filter((c) => scores[c.id] && excludedIds.includes(c.id))
+        .sort((a, b) => scores[b.id].score - scores[a.id].score),
+    [pool, scores, excludedIds]
   );
 
   const profileTextFor = (t) =>
@@ -2413,10 +2432,33 @@ BODY:
   // score entirely. Useful for testing the pipeline end-to-end with a
   // known contact, or for "I know this one matters, skip the scoring".
   const pinContact = (id) => {
+    // Pinning and excluding are opposites — pinning something Tammy earlier
+    // excluded should bring it back, not leave it in both states.
+    if (excludedIds.includes(id)) {
+      const next = excludedIds.filter((x) => x !== id);
+      setExcludedIds(next);
+      saveKey(K.excluded, next);
+    }
     setScores((prev) => ({
       ...prev,
       [id]: { score: 100, reason: "수동 고정 — 사용자가 직접 최상위로 지정" },
     }));
+  };
+
+  // Manually drop a contact out of the match results — Tammy's counterpart
+  // to pinContact (2026-08-04 request). The row moves to the "수동 제외됨"
+  // strip below the list, from which one click restores it.
+  const excludeContact = (id) => {
+    if (excludedIds.includes(id)) return;
+    const next = [...excludedIds, id];
+    setExcludedIds(next);
+    saveKey(K.excluded, next);
+  };
+
+  const restoreContact = (id) => {
+    const next = excludedIds.filter((x) => x !== id);
+    setExcludedIds(next);
+    saveKey(K.excluded, next);
   };
 
   // The CSV contains names, titles and work email addresses of real people
@@ -4075,8 +4117,68 @@ BODY:
                   >
                     <Pin size={12} strokeWidth={2.3} />
                   </button>
+                  <button
+                    onClick={() => excludeContact(c.id)}
+                    title="이 컨택을 이번 매칭 결과에서 제외 (아래에서 복원 가능)"
+                    style={{
+                      display: "flex",
+                      alignItems: "center",
+                      justifyContent: "center",
+                      width: 26,
+                      height: 26,
+                      flexShrink: 0,
+                      border: `1px solid ${C.line}`,
+                      borderRadius: 5,
+                      background: "transparent",
+                      color: C.mute,
+                      cursor: "pointer",
+                    }}
+                  >
+                    <X size={13} strokeWidth={2.3} />
+                  </button>
                 </div>
               ))}
+              {excludedScored.length > 0 && (
+                <div
+                  style={{
+                    padding: "12px 16px",
+                    borderTop: `1px solid ${C.line}`,
+                    background: "#FAFBFC",
+                  }}
+                >
+                  <div style={{ fontSize: 11, fontWeight: 600, color: C.mute, marginBottom: 8 }}>
+                    수동 제외됨 · {excludedScored.length}건 — 초안·발송·내보내기에서 모두
+                    빠집니다. 클릭하면 복원됩니다.
+                  </div>
+                  <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
+                    {excludedScored.map((c) => (
+                      <button
+                        key={c.id}
+                        onClick={() => restoreContact(c.id)}
+                        title={`${c.org} 복원 (점수 ${scores[c.id].score})`}
+                        style={{
+                          display: "flex",
+                          alignItems: "center",
+                          gap: 6,
+                          fontSize: 11.5,
+                          padding: "5px 10px",
+                          borderRadius: 999,
+                          border: `1px solid ${C.line}`,
+                          background: C.surface,
+                          color: C.mute,
+                          cursor: "pointer",
+                          textDecoration: "line-through",
+                        }}
+                      >
+                        {c.org}
+                        <span style={{ textDecoration: "none", color: C.pine, fontWeight: 700 }}>
+                          ↺
+                        </span>
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              )}
               {!scored.length && (
                 <div style={{ padding: 40, textAlign: "center", color: C.mute, fontSize: 13 }}>
                   아직 매칭 결과가 없습니다. 스타트업 탭에서 스코어링을 실행하세요.
