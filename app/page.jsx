@@ -137,9 +137,7 @@ const DEFAULT_SENDER = {
 const TYPE_OPTIONS = [
   "VC",
   "CORPORATE_KR",
-  "ACCELERATOR",
   "INSTITUTION",
-  "AGENCY",
   "REMEMBER",
   "EVENT_GUEST", // 행사 게스트·초청자 리스트 (Luma 데모데이, 기보 초청자 등)
   "TEST",
@@ -1123,7 +1121,11 @@ export default function App() {
         if (Array.isArray(p.extraTypes))
           setExtraTypes(
             p.extraTypes.map((t) =>
-              t === "PERSONAL_NETWORK" ? "REMEMBER" : t === "INTERMEDIARY" ? "AGENCY" : t
+              t === "PERSONAL_NETWORK"
+                ? "REMEMBER"
+                : ["INTERMEDIARY", "AGENCY", "ACCELERATOR"].includes(t)
+                ? "INSTITUTION"
+                : t
             )
           );
       }
@@ -1527,7 +1529,8 @@ Return ONLY a JSON array, no prose, no markdown:
               const t = (x.type || "").trim();
               if (t === "VC_CRYPTO_LIST") return "VC";
               if (t === "PERSONAL_NETWORK") return "REMEMBER";
-              if (t === "INTERMEDIARY") return "AGENCY";
+              if (t === "INTERMEDIARY" || t === "AGENCY" || t === "ACCELERATOR")
+                return "INSTITUTION";
               return t;
             })(),
             notes: (x.notes || "").trim(),
@@ -1663,7 +1666,7 @@ Return ONLY a JSON array, no prose, no markdown:
     if (aud === "TEST") return ["TEST"];
     if (aud === "VC") return TYPE_OPTIONS.filter((t) => t.startsWith("VC"));
     if (aud === "CORPORATE_KR") return ["CORPORATE_KR"];
-    return ["ACCELERATOR", "INSTITUTION", "AGENCY"];
+    return ["INSTITUTION"];
   };
 
   // Contacts with no company name are excluded from outreach entirely — not
