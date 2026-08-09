@@ -3755,7 +3755,7 @@ BODY:
             </Card>
 
             <Card>
-              <H sub="누구에게 보낼지 정합니다.">캠페인</H>
+              <H sub="이 메일을 무슨 목적으로 보내는지 고르고, 아래 체크박스로 대상 유형을 넓힐 수 있습니다.">캠페인</H>
               {audience === "TEST" && (
                 <div
                   style={{
@@ -3847,8 +3847,9 @@ BODY:
                   too. TEST is excluded here; it stays an isolated sandbox. */}
               {(() => {
                 const base = baseTypesFor(audience);
-                const extra = TYPE_OPTIONS.filter(
-                  (t) => t !== "TEST" && !base.includes(t)
+                const inDb = [...new Set(contacts.map((c) => c.type))];
+                const extra = [...new Set([...TYPE_OPTIONS, ...inDb])].filter(
+                  (t) => t && t !== "TEST" && !base.includes(t)
                 );
                 if (!extra.length) return null;
                 return (
