@@ -624,7 +624,11 @@ async function claude(prompt, maxTokens = 1000, tries = 0) {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
-      model: "claude-sonnet-4-6",
+      // Haiku everywhere as of 2026-08-10 (Donghyun's cost call): drafting,
+      // bundle coherence, and everything else that used this helper. Matching
+      // and enrichment were already on Haiku. If draft quality noticeably
+      // drops, this is the one line to flip back to "claude-sonnet-4-6".
+      model: "claude-haiku-4-5-20251001",
       max_tokens: maxTokens,
       messages: [{ role: "user", content: prompt }],
     }),
@@ -721,7 +725,8 @@ async function claudeWithDoc(source, prompt, maxTokens = 1500, tries = 0) {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
-      model: "claude-sonnet-4-6",
+      // Haiku handles PDF/image extraction fine and costs a third as much.
+      model: "claude-haiku-4-5-20251001",
       max_tokens: maxTokens,
       messages: [{ role: "user", content: [block, { type: "text", text: prompt }] }],
     }),
