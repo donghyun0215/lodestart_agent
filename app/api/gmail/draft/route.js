@@ -16,17 +16,59 @@ function refreshToken(rt) {
 }
 
 // Build a raw RFC-2822 message, base64url-encoded, UTF-8 safe (handles Korean).
-function buildRaw({ to, subject, body }) {
+//
+// Two things here exist because Outlook taught us they must:
+// 1. Base64 bodies are wrapped at 76 chars. RFC 2045 requires it; Gmail's
+//    own reader forgives a single kilometre-long line, but Outlook (and some
+//    Android mail apps) corrupt multibyte text when the line limit is
+//    ignored — that was the "글자가 다 깨져요" bug.
+// 2. The message is multipart/alternative with a plain-text part AND an
+//    HTML part, so bold/underline formatting survives in every client, and
+//    clients that prefer plain text still get a clean fallback.
+function wrap76(b64) {
+  return b64.replace(/(.{76})/g, "$1\r\n");
+}
+
+function escapeHtml(t) {
+  return t
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;");
+}
+
+function buildRaw({ to, cc, subject, body, html }) {
   const enc = (s) =>
     "=?UTF-8?B?" + Buffer.from(s, "utf-8").toString("base64") + "?=";
-  const lines = [
+  const boundary = "ld_" + Math.random().toString(36).slice(2);
+  // Plain part: the body as given. HTML part: provided rich HTML, or the
+  // plain text escaped with line breaks preserved.
+  const htmlBody =
+    html && html.trim()
+      ? html
+      : `<div style="font-family:Arial,sans-serif;font-size:14px;line-height:1.6">${escapeHtml(
+          body
+        ).replace(/\n/g, "<br>")}</div>`;
+  const headers = [
     `To: ${to}`,
+    ...(cc && cc.trim() ? [`Cc: ${cc}`] : []),
     `Subject: ${enc(subject)}`,
     "MIME-Version: 1.0",
+    `Content-Type: multipart/alternative; boundary="${boundary}"`,
+  ];
+  const lines = [
+    ...headers,
+    "",
+    `--${boundary}`,
     'Content-Type: text/plain; charset="UTF-8"',
     "Content-Transfer-Encoding: base64",
     "",
-    Buffer.from(body, "utf-8").toString("base64"),
+    wrap76(Buffer.from(body, "utf-8").toString("base64")),
+    `--${boundary}`,
+    'Content-Type: text/html; charset="UTF-8"',
+    "Content-Transfer-Encoding: base64",
+    "",
+    wrap76(Buffer.from(htmlBody, "utf-8").toString("base64")),
+    `--${boundary}--`,
   ];
   return Buffer.from(lines.join("\r\n"), "utf-8")
     .toString("base64")
@@ -56,7 +98,7 @@ async function upsertDraft(accessToken, msg, existingDraftId) {
 
 export async function POST(req) {
   try {
-    const { drafts } = await req.json(); // [{to, subject, body}, ...]
+    const { drafts } = await req.json(); // [{to, cc, subject, body, html}, ...]
     const cookie = req.headers.get("cookie") || "";
     const get = (k) =>
       (cookie.match(new RegExp(`${k}=([^;]+)`)) || [])[1] || "";

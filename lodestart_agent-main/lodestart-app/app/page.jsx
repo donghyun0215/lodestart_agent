@@ -135,11 +135,10 @@ const DEFAULT_SENDER = {
 // migration_merge_vc.sql) — most firms tagged as crypto investors were
 // ordinary VCs and splitting them meant reading every count twice.
 const TYPE_OPTIONS = [
-  "VC",
+  "INVESTOR",
   "CORPORATE_KR",
-  "INSTITUTION",
-  "REMEMBER",
-  "EVENT_GUEST", // 행사 게스트·초청자 리스트 (Luma 데모데이, 기보 초청자 등)
+  "GOV_AND_AGENCY",
+  "OTHERS", // 명함첩·행사 게스트 등 잡다한 네트워크 컨택
   "TEST",
 ];
 
@@ -374,6 +373,110 @@ function DeckImport({ busy, busyKey, onFile, onUrl, compact }) {
   );
 }
 
+// --- rich draft body -------------------------------------------------------
+// Drafts carry plain text in `body` (what the AI wrote / what tone learning
+// diffs) and, once the user formats anything, an `html` version alongside.
+// The Gmail push sends both as multipart/alternative, so bold/underline
+// survives in every client while plain-text readers still get clean text.
+function escapeHtmlClient(t) {
+  return String(t).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+}
+function textToHtml(t) {
+  return escapeHtmlClient(t || "").replace(/\n/g, "<br>");
+}
+function stripHtml(h) {
+  if (typeof document === "undefined") return String(h || "");
+  const el = document.createElement("div");
+  el.innerHTML = String(h || "");
+  return el.innerText;
+}
+// The plain-text truth of a draft, whether or not it has been formatted.
+function bodyOf(d) {
+  return d?.html ? stripHtml(d.html) : d?.body || "";
+}
+
+// contentEditable body editor with a Gmail-style mini toolbar. Uncontrolled
+// while typing (so the caret survives re-renders); it only rewrites its DOM
+// when the draft's content changed from OUTSIDE — e.g. 재생성 replacing the
+// body — which it detects by comparing stripped text, not HTML.
+function RichBody({ draft, onHtml }) {
+  const ref = React.useRef(null);
+  const desired = draft.html ?? textToHtml(draft.body || "");
+  React.useEffect(() => {
+    const el = ref.current;
+    if (!el) return;
+    if (!el.innerHTML || stripHtml(el.innerHTML) !== stripHtml(desired)) {
+      el.innerHTML = desired;
+    }
+  }, [desired]);
+  const cmd = (k) => {
+    ref.current?.focus();
+    document.execCommand(k);
+    onHtml(ref.current.innerHTML);
+  };
+  const tb = (label, k, styleText) => (
+    <button
+      key={k}
+      onMouseDown={(e) => e.preventDefault()} // keep the selection in the editor
+      onClick={() => cmd(k)}
+      title={label}
+      style={{
+        width: 28,
+        height: 26,
+        border: `1px solid ${C.line}`,
+        borderRadius: 5,
+        background: C.surface,
+        cursor: "pointer",
+        fontSize: 12.5,
+        color: C.ink,
+        ...styleText,
+      }}
+    >
+      {label}
+    </button>
+  );
+  return (
+    <div style={{ marginBottom: 14 }}>
+      <div
+        style={{
+          display: "flex",
+          alignItems: "center",
+          gap: 4,
+          marginBottom: 6,
+        }}
+      >
+        <span style={{ fontSize: 11.5, fontWeight: 600, color: C.mute, marginRight: 6 }}>
+          본문 — 고치면 학습합니다
+        </span>
+        {tb("B", "bold", { fontWeight: 800 })}
+        {tb("I", "italic", { fontStyle: "italic" })}
+        {tb("U", "underline", { textDecoration: "underline" })}
+      </div>
+      <div
+        ref={ref}
+        contentEditable
+        suppressContentEditableWarning
+        onInput={(e) => onHtml(e.currentTarget.innerHTML)}
+        style={{
+          minHeight: 260,
+          maxHeight: 460,
+          overflowY: "auto",
+          border: `1px solid ${C.line}`,
+          borderRadius: 8,
+          padding: "12px 14px",
+          fontSize: 13,
+          lineHeight: 1.7,
+          fontFamily: "Inter, sans-serif",
+          color: C.ink,
+          background: C.surface,
+          outline: "none",
+          whiteSpace: "pre-wrap",
+        }}
+      />
+    </div>
+  );
+}
+
 function maskEmail(email, staff = false) {
   if (!email) return "";
   // Staff (lodestart.ai Gmail login, verified server-side by /api/auth/status)
@@ -583,7 +686,11 @@ async function claudeSearch(prompt, maxTokens = 2000, maxSearches = 4, tries = 0
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
-      model: "claude-sonnet-4-6",
+      // Haiku, not Sonnet: this job reads search results and writes one
+      // factual line per company — Haiku handles that at 1/3 the token
+      // price. The Aug-09 cost spike was Sonnet doing this work; the
+      // search fee itself ($10/1k calls) is fixed regardless of model.
+      model: "claude-haiku-4-5-20251001",
       max_tokens: maxTokens,
       web_search: true,
       max_searches: maxSearches,
@@ -965,7 +1072,10 @@ export default function App() {
   const [coherence, setCoherence] = useState({}); // contactId -> { ok, reason }
 
   const [audience, setAudience] = useState("CORPORATE_KR");
-  const [extraTypes, setExtraTypes] = useState([]); // raw types layered on top of the audience's default pool (e.g. REMEMBER)
+  const [extraTypes, setExtraTypes] = useState([]); // raw types layered on top of the audience's default pool
+  // Default CC on every outgoing draft — Tammy's request: support@ stays in
+  // the loop on all outreach. Editable in the review tab; empty disables.
+  const [ccAddr, setCcAddr] = useState("support@lodestart.ai");
   const [limit, setLimit] = useState("15"); // free text while typing — validated on run, not per keystroke
   const limitNum = parseInt(limit, 10);
   const [lang, setLang] = useState("EN"); // EN | KO
@@ -1118,13 +1228,16 @@ export default function App() {
         if (p.audience) setAudience(p.audience);
         if (p.lang) setLang(p.lang);
         if (p.tab) setTab(p.tab);
+        if (typeof p.ccAddr === "string") setCcAddr(p.ccAddr);
         if (Array.isArray(p.extraTypes))
           setExtraTypes(
             p.extraTypes.map((t) =>
-              t === "PERSONAL_NETWORK"
-                ? "REMEMBER"
-                : ["INTERMEDIARY", "AGENCY", "ACCELERATOR"].includes(t)
-                ? "INSTITUTION"
+              t === "VC" || t === "VC_CRYPTO_LIST"
+                ? "INVESTOR"
+                : ["INSTITUTION", "INTERMEDIARY", "AGENCY", "ACCELERATOR"].includes(t)
+                ? "GOV_AND_AGENCY"
+                : ["REMEMBER", "PERSONAL_NETWORK", "EVENT_GUEST"].includes(t)
+                ? "OTHERS"
                 : t
             )
           );
@@ -1147,8 +1260,8 @@ export default function App() {
   // (and so the campaign-restore effect below knows where to look).
   useEffect(() => {
     if (!ready) return;
-    saveKey(K.prefs, { audience, lang, tab, extraTypes });
-  }, [ready, audience, lang, tab, extraTypes]);
+    saveKey(K.prefs, { audience, lang, tab, extraTypes, ccAddr });
+  }, [ready, audience, lang, tab, extraTypes, ccAddr]);
 
   // Restore a previous campaign's matches/drafts/statuses from the DB when
   // landing on a startup+audience that already has saved work. Without
@@ -1527,10 +1640,11 @@ Return ONLY a JSON array, no prose, no markdown:
             // so re-uploading an old CSV can't undo a rename/merge.
             type: (() => {
               const t = (x.type || "").trim();
-              if (t === "VC_CRYPTO_LIST") return "VC";
-              if (t === "PERSONAL_NETWORK") return "REMEMBER";
-              if (t === "INTERMEDIARY" || t === "AGENCY" || t === "ACCELERATOR")
-                return "INSTITUTION";
+              if (t === "VC" || t === "VC_CRYPTO_LIST") return "INVESTOR";
+              if (["INSTITUTION", "INTERMEDIARY", "AGENCY", "ACCELERATOR"].includes(t))
+                return "GOV_AND_AGENCY";
+              if (["REMEMBER", "PERSONAL_NETWORK", "EVENT_GUEST"].includes(t))
+                return "OTHERS";
               return t;
             })(),
             notes: (x.notes || "").trim(),
@@ -1664,9 +1778,9 @@ Return ONLY a JSON array, no prose, no markdown:
   // without having to invent a new audience bucket for every combination.
   const baseTypesFor = (aud) => {
     if (aud === "TEST") return ["TEST"];
-    if (aud === "VC") return TYPE_OPTIONS.filter((t) => t.startsWith("VC"));
+    if (aud === "VC") return ["INVESTOR"]; // audience key stays "VC"; the contact type is INVESTOR
     if (aud === "CORPORATE_KR") return ["CORPORATE_KR"];
-    return ["INSTITUTION"];
+    return ["GOV_AND_AGENCY"];
   };
 
   // Contacts with no company name are excluded from outreach entirely — not
@@ -2159,6 +2273,7 @@ BODY:
     setDrafts({
       ...drafts,
       [id]: { ...d, body: newBody, orig: base, edited: true },
+      // d.html (if any) stays — formatting survives the learning commit.
     });
     setEditNote(
       `톤 학습 반영 (누적 ${nextEdits.length}건). 이미 만들어진 다른 초안에는 자동 적용되지 않습니다 — 아래 "학습 반영해 재생성"을 누르세요.`
@@ -2256,8 +2371,10 @@ BODY:
       .map((c) => ({
         id: c.id,
         to: c.email,
+        cc: ccAddr.trim(),
         subject: drafts[c.id].subject,
-        body: drafts[c.id].body,
+        body: bodyOf(drafts[c.id]),
+        html: drafts[c.id].html || null,
         existingDraftId: gmailDraftIds[c.id] || null,
       }));
     if (!rows.length) return;
@@ -4299,6 +4416,36 @@ BODY:
                 >
                   {lang === "KO" ? "한국어로 다시 생성" : "Regenerate in English"}
                 </Btn>
+                <div
+                  style={{
+                    display: "flex",
+                    alignItems: "center",
+                    gap: 6,
+                    border: `1px solid ${C.line}`,
+                    borderRadius: 8,
+                    padding: "0 10px",
+                    background: C.surface,
+                  }}
+                  title="모든 발송 메일에 참조(CC)로 들어갑니다. 비우면 CC 없이 나갑니다."
+                >
+                  <span style={{ fontSize: 11, fontWeight: 700, color: C.mute }}>CC</span>
+                  <input
+                    value={ccAddr}
+                    onChange={(e) => setCcAddr(e.target.value)}
+                    placeholder="(없음)"
+                    style={{
+                      border: "none",
+                      outline: "none",
+                      boxShadow: "none",
+                      fontSize: 12,
+                      fontFamily: "'JetBrains Mono', monospace",
+                      color: C.ink,
+                      width: 185,
+                      background: "transparent",
+                      padding: "9px 0",
+                    }}
+                  />
+                </div>
                 <Btn
                   icon={FileUp}
                   onClick={pushToGmail}
@@ -4478,19 +4625,16 @@ BODY:
                               setDrafts({ ...drafts, [c.id]: { ...d, subject: v } })
                             }
                           />
-                          <Field
-                            label="본문 — 고치면 학습합니다"
-                            value={d.body}
-                            area
-                            rows={14}
-                            onChange={(v) =>
-                              setDrafts({ ...drafts, [c.id]: { ...d, body: v } })
+                          <RichBody
+                            draft={d}
+                            onHtml={(h) =>
+                              setDrafts({ ...drafts, [c.id]: { ...d, html: h } })
                             }
                           />
                           <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
                             <Btn
                               small
-                              onClick={() => commitEdit(c.id, d.body)}
+                              onClick={() => commitEdit(c.id, bodyOf(d))}
                             >
                               수정 반영 · 톤 학습
                             </Btn>
@@ -4499,7 +4643,7 @@ BODY:
                               kind="ghost"
                               onClick={() =>
                                 navigator.clipboard.writeText(
-                                  `To: ${c.email}\nSubject: ${d.subject}\n\n${d.body}`
+                                  `To: ${c.email}\nSubject: ${d.subject}\n\n${bodyOf(d)}`
                                 )
                               }
                             >
@@ -4512,7 +4656,7 @@ BODY:
                                 window.open(
                                   `mailto:${c.email}?subject=${encodeURIComponent(
                                     d.subject
-                                  )}&body=${encodeURIComponent(d.body)}`
+                                  )}&body=${encodeURIComponent(bodyOf(d))}`
                                 )
                               }
                             >
