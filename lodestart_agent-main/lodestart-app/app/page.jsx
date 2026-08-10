@@ -136,11 +136,29 @@ const DEFAULT_SENDER = {
 // ordinary VCs and splitting them meant reading every count twice.
 const TYPE_OPTIONS = [
   "INVESTOR",
-  "CORPORATE_KR",
-  "GOV_AND_AGENCY",
-  "OTHERS", // 명함첩·행사 게스트 등 잡다한 네트워크 컨택
+  "CORPORATE",
+  "GOV",
+  "RESEARCH",
+  "STARTUP",
+  "OTHERS",
+  "UNCLASSIFIED",
   "TEST",
 ];
+
+// Tammy's taxonomy (2026-08-10). Internal ids stay English (stable for code
+// and stored data); everything the user sees goes through this map. New DB
+// dumps land in 미분류 and she sorts them into the real buckets herself.
+const TYPE_LABELS = {
+  INVESTOR: "투자자",
+  CORPORATE: "일반기업",
+  GOV: "공공기관",
+  RESEARCH: "연구기관",
+  STARTUP: "스타트업",
+  OTHERS: "기타",
+  UNCLASSIFIED: "미분류",
+  TEST: "테스트",
+};
+const typeLabel = (t) => TYPE_LABELS[t] || t;
 
 // A startup profile. `offer` is the field that was missing: the concrete,
 // time-boxed thing on the table (e.g. a free trial for chamber members).
@@ -536,7 +554,7 @@ function ContactHoverCard({ contact, staff, children }) {
               marginBottom: 6,
             }}
           >
-            {c.type}
+            {typeLabel(c.type)}
           </div>
 
           <div
@@ -1239,10 +1257,12 @@ export default function App() {
             p.extraTypes.map((t) =>
               t === "VC" || t === "VC_CRYPTO_LIST"
                 ? "INVESTOR"
-                : ["INSTITUTION", "INTERMEDIARY", "AGENCY", "ACCELERATOR"].includes(t)
-                ? "GOV_AND_AGENCY"
-                : ["REMEMBER", "PERSONAL_NETWORK", "EVENT_GUEST"].includes(t)
-                ? "OTHERS"
+                : t === "CORPORATE_KR"
+                ? "CORPORATE"
+                : ["INSTITUTION", "INTERMEDIARY", "AGENCY", "ACCELERATOR", "GOV_AND_AGENCY"].includes(t)
+                ? "GOV"
+                : ["REMEMBER", "PERSONAL_NETWORK", "EVENT_GUEST", "OTHERS"].includes(t)
+                ? "UNCLASSIFIED"
                 : t
             )
           );
@@ -1644,13 +1664,16 @@ Return ONLY a JSON array, no prose, no markdown:
             // Legacy exports still carry old names — normalise on the way in
             // so re-uploading an old CSV can't undo a rename/merge.
             type: (() => {
-              const t = (x.type || "").trim();
+              const t = (x.type || "").trim().toUpperCase();
               if (t === "VC" || t === "VC_CRYPTO_LIST") return "INVESTOR";
-              if (["INSTITUTION", "INTERMEDIARY", "AGENCY", "ACCELERATOR"].includes(t))
-                return "GOV_AND_AGENCY";
+              if (t === "CORPORATE_KR") return "CORPORATE";
+              if (["INSTITUTION", "INTERMEDIARY", "AGENCY", "ACCELERATOR", "GOV_AND_AGENCY"].includes(t))
+                return "GOV";
               if (["REMEMBER", "PERSONAL_NETWORK", "EVENT_GUEST"].includes(t))
-                return "OTHERS";
-              return t;
+                return "UNCLASSIFIED";
+              // Tammy's intake flow: anything unnamed or unrecognised lands in
+              // 미분류 for her to sort, instead of inventing new buckets.
+              return TYPE_OPTIONS.includes(t) ? t : "UNCLASSIFIED";
             })(),
             notes: (x.notes || "").trim(),
             sendable: (x.sendable || "YES").trim() || "YES",
@@ -1784,8 +1807,8 @@ Return ONLY a JSON array, no prose, no markdown:
   const baseTypesFor = (aud) => {
     if (aud === "TEST") return ["TEST"];
     if (aud === "VC") return ["INVESTOR"]; // audience key stays "VC"; the contact type is INVESTOR
-    if (aud === "CORPORATE_KR") return ["CORPORATE_KR"];
-    return ["GOV_AND_AGENCY"];
+    if (aud === "CORPORATE_KR") return ["CORPORATE", "STARTUP"]; // PoC·영업 covers corporates and listed startups
+    return ["GOV", "RESEARCH"]; // 기관 OIP covers public agencies and research institutes
   };
 
   // Contacts with no company name are excluded from outreach entirely — not
@@ -3173,7 +3196,7 @@ BODY:
                       >
                         {n}
                       </div>
-                      <div style={{ fontSize: 11, color: C.mute }}>{t}</div>
+                      <div style={{ fontSize: 11, color: C.mute }}>{typeLabel(t)}</div>
                     </button>
                   ))}
                 </div>
@@ -3215,7 +3238,7 @@ BODY:
                   </div>
                   {contactTypeFilter !== "ALL" && (
                     <Btn small kind="ghost" onClick={() => setContactTypeFilter("ALL")}>
-                      {contactTypeFilter} 필터 해제
+                      {typeLabel(contactTypeFilter)} 필터 해제
                     </Btn>
                   )}
                   <div style={{ marginLeft: "auto", fontSize: 12, color: C.mute }}>
@@ -3466,7 +3489,7 @@ BODY:
                               >
                                 {TYPE_OPTIONS.map((t) => (
                                   <option key={t} value={t}>
-                                    {t}
+                                    {typeLabel(t)}
                                   </option>
                                 ))}
                                 {!TYPE_OPTIONS.includes(editRow.type) &&
@@ -3637,7 +3660,7 @@ BODY:
                       >
                         {TYPE_OPTIONS.map((t) => (
                           <option key={t} value={t}>
-                            {t}
+                            {typeLabel(t)}
                           </option>
                         ))}
                       </select>
@@ -4010,7 +4033,7 @@ BODY:
                               cursor: "pointer",
                             }}
                           >
-                            {t} ({n})
+                            {typeLabel(t)} ({n})
                           </button>
                         );
                       })}
