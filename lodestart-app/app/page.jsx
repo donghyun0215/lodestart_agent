@@ -137,7 +137,7 @@ const DEFAULT_SENDER = {
 const TYPE_OPTIONS = [
   "INVESTOR",
   "CORPORATE",
-  "GOV",
+  "GOV_AND_AGENCY",
   "RESEARCH",
   "STARTUP",
   "OTHERS",
@@ -145,19 +145,11 @@ const TYPE_OPTIONS = [
   "TEST",
 ];
 
-// Tammy's taxonomy (2026-08-10). Internal ids stay English (stable for code
-// and stored data); everything the user sees goes through this map. New DB
-// dumps land in 미분류 and she sorts them into the real buckets herself.
-const TYPE_LABELS = {
-  INVESTOR: "투자자",
-  CORPORATE: "일반기업",
-  GOV: "공공기관",
-  RESEARCH: "연구기관",
-  STARTUP: "스타트업",
-  OTHERS: "기타",
-  UNCLASSIFIED: "미분류",
-  TEST: "테스트",
-};
+// Tammy's taxonomy (2026-08-10): 투자자/일반기업/공공기관·에이전시/연구기관/
+// 스타트업/기타/미분류 — displayed in ENGLISH per Donghyun's call. The map is
+// kept as a hook so relabeling later is a one-place change; today it just
+// echoes the id.
+const TYPE_LABELS = {};
 const typeLabel = (t) => TYPE_LABELS[t] || t;
 
 // A startup profile. `offer` is the field that was missing: the concrete,
@@ -1259,8 +1251,8 @@ export default function App() {
                 ? "INVESTOR"
                 : t === "CORPORATE_KR"
                 ? "CORPORATE"
-                : ["INSTITUTION", "INTERMEDIARY", "AGENCY", "ACCELERATOR", "GOV_AND_AGENCY"].includes(t)
-                ? "GOV"
+                : ["INSTITUTION", "INTERMEDIARY", "AGENCY", "ACCELERATOR", "GOV"].includes(t)
+                ? "GOV_AND_AGENCY"
                 : ["REMEMBER", "PERSONAL_NETWORK", "EVENT_GUEST", "OTHERS"].includes(t)
                 ? "UNCLASSIFIED"
                 : t
@@ -1667,8 +1659,8 @@ Return ONLY a JSON array, no prose, no markdown:
               const t = (x.type || "").trim().toUpperCase();
               if (t === "VC" || t === "VC_CRYPTO_LIST") return "INVESTOR";
               if (t === "CORPORATE_KR") return "CORPORATE";
-              if (["INSTITUTION", "INTERMEDIARY", "AGENCY", "ACCELERATOR", "GOV_AND_AGENCY"].includes(t))
-                return "GOV";
+              if (["INSTITUTION", "INTERMEDIARY", "AGENCY", "ACCELERATOR", "GOV"].includes(t))
+                return "GOV_AND_AGENCY";
               if (["REMEMBER", "PERSONAL_NETWORK", "EVENT_GUEST"].includes(t))
                 return "UNCLASSIFIED";
               // Tammy's intake flow: anything unnamed or unrecognised lands in
@@ -1808,7 +1800,7 @@ Return ONLY a JSON array, no prose, no markdown:
     if (aud === "TEST") return ["TEST"];
     if (aud === "VC") return ["INVESTOR"]; // audience key stays "VC"; the contact type is INVESTOR
     if (aud === "CORPORATE_KR") return ["CORPORATE", "STARTUP"]; // PoC·영업 covers corporates and listed startups
-    return ["GOV", "RESEARCH"]; // 기관 OIP covers public agencies and research institutes
+    return ["GOV_AND_AGENCY", "RESEARCH"]; // 기관 OIP covers public agencies/agencies and research institutes
   };
 
   // Contacts with no company name are excluded from outreach entirely — not

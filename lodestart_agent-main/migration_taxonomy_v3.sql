@@ -13,15 +13,15 @@ update contacts set type = 'INVESTOR', updated_at = now()
 update contacts set type = 'CORPORATE', updated_at = now()
  where type = 'CORPORATE_KR';
 
--- 공공기관 (연구기관은 미분류/공공기관에서 Tammy가 골라 RESEARCH로 옮김)
-update contacts set type = 'GOV', updated_at = now()
- where type in ('INSTITUTION', 'ACCELERATOR', 'AGENCY', 'INTERMEDIARY', 'GOV_AND_AGENCY');
+-- 공공기관·에이전시 (연구기관은 여기/미분류에서 Tammy가 골라 RESEARCH로 옮김)
+update contacts set type = 'GOV_AND_AGENCY', updated_at = now()
+ where type in ('INSTITUTION', 'ACCELERATOR', 'AGENCY', 'INTERMEDIARY', 'GOV');
 
 -- 미분류 — 행사 참여·리멤버 등 새 DB 덤프는 여기 모이고, Tammy가 분류해서
 -- 스타트업/연구기관/기타 등 해당 버킷으로 옮김
 update contacts set type = 'UNCLASSIFIED', updated_at = now()
  where type in ('REMEMBER', 'PERSONAL_NETWORK', 'EVENT_GUEST', 'OTHERS');
 
--- 확인: INVESTOR / CORPORATE / GOV / UNCLASSIFIED / TEST 만 남아야 정상
+-- 확인: INVESTOR / CORPORATE / GOV_AND_AGENCY / UNCLASSIFIED / TEST 만 남아야 정상
 -- (STARTUP / RESEARCH / OTHERS 는 이후 수동 분류로 채워짐)
 select type, count(*) from contacts group by type order by count(*) desc;
