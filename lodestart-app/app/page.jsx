@@ -395,10 +395,21 @@ function textToHtml(t) {
   return escapeHtmlClient(t || "").replace(/\n/g, "<br>");
 }
 function stripHtml(h) {
-  if (typeof document === "undefined") return String(h || "");
-  const el = document.createElement("div");
-  el.innerHTML = String(h || "");
-  return el.innerText;
+  // Regex-based on purpose: the old createElement/innerText version forced
+  // DOM parsing + layout on every call, and RichBody's sync effect calls
+  // this on each keystroke — one of the "자주 멎는" contributors.
+  return String(h || "")
+    .replace(/<br\s*\/?>/gi, "\n")
+    .replace(/<\/(p|div|li|h[1-6]|tr)>/gi, "\n")
+    .replace(/<[^>]+>/g, "")
+    .replace(/&nbsp;/g, " ")
+    .replace(/&amp;/g, "&")
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;/g, "'")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
 }
 // The plain-text truth of a draft, whether or not it has been formatted.
 function bodyOf(d) {
@@ -415,6 +426,11 @@ function RichBody({ draft, onHtml }) {
   React.useEffect(() => {
     const el = ref.current;
     if (!el) return;
+    // While the user is typing here, the state we just emitted comes straight
+    // back as `desired` — comparing and rewriting on every keystroke is
+    // wasted work (and risks caret jumps). External changes (재생성 etc.)
+    // never happen mid-focus, so syncing only while unfocused is safe.
+    if (typeof document !== "undefined" && document.activeElement === el) return;
     if (!el.innerHTML || stripHtml(el.innerHTML) !== stripHtml(desired)) {
       el.innerHTML = desired;
     }
@@ -423,6 +439,24 @@ function RichBody({ draft, onHtml }) {
     ref.current?.focus();
     document.execCommand(k);
     onHtml(ref.current.innerHTML);
+  };
+  // Turn the selected text into a link (Tammy's request). Selection must
+  // exist — linkifying nothing is a no-op with a hint instead of a surprise.
+  const addLink = () => {
+    const el = ref.current;
+    if (!el) return;
+    el.focus();
+    const sel = typeof window !== "undefined" ? window.getSelection() : null;
+    if (!sel || sel.isCollapsed) {
+      alert("링크를 걸 텍스트를 먼저 드래그로 선택해주세요.");
+      return;
+    }
+    let url = window.prompt("링크 주소 (https://…)");
+    if (!url) return;
+    url = url.trim();
+    if (!/^https?:\/\//i.test(url)) url = "https://" + url;
+    document.execCommand("createLink", false, url);
+    onHtml(el.innerHTML);
   };
   const tb = (label, k, styleText) => (
     <button
@@ -461,6 +495,24 @@ function RichBody({ draft, onHtml }) {
         {tb("B", "bold", { fontWeight: 800 })}
         {tb("I", "italic", { fontStyle: "italic" })}
         {tb("U", "underline", { textDecoration: "underline" })}
+        <button
+          onMouseDown={(e) => e.preventDefault()}
+          onClick={addLink}
+          title="선택한 텍스트에 링크 걸기"
+          style={{
+            height: 26,
+            padding: "0 8px",
+            border: `1px solid ${C.line}`,
+            borderRadius: 5,
+            background: C.surface,
+            cursor: "pointer",
+            fontSize: 11.5,
+            color: C.pine,
+            fontWeight: 600,
+          }}
+        >
+          🔗 링크
+        </button>
       </div>
       <div
         ref={ref}
@@ -483,6 +535,7 @@ function RichBody({ draft, onHtml }) {
           whiteSpace: "pre-wrap",
         }}
       />
+      <style>{`[contenteditable] a { color: #1a5fb4; text-decoration: underline; }`}</style>
     </div>
   );
 }
@@ -1084,6 +1137,10 @@ export default function App() {
   // score) means drafts, CSV export, Gmail push and the dashboard all skip
   // them with no extra checks anywhere.
   const [excludedIds, setExcludedIds] = useState([]);
+  // The match list used to render EVERY scored contact at once. With the
+  // old 115-contact corporate pool nobody noticed; with the 1,300+ INVESTOR
+  // pool it froze the tab on each re-render — that was Tammy's "자주 멎어요".
+  const [matchShown, setMatchShown] = useState(120);
   const [coherence, setCoherence] = useState({}); // contactId -> { ok, reason }
 
   const [audience, setAudience] = useState("CORPORATE_KR");
@@ -1192,9 +1249,9 @@ export default function App() {
       onUsage = null;
     };
   }, []);
-  // Sonnet pricing approx $3/MTok in, $15/MTok out — this is an ESTIMATE,
-  // not a real balance read (the API key can't report remaining credit).
-  const estCost = (usage.in / 1e6) * 3 + (usage.out / 1e6) * 15;
+  // Haiku pricing approx $1/MTok in, $5/MTok out (everything runs on Haiku
+  // as of 2026-08-10) — an ESTIMATE, not a real balance read.
+  const estCost = (usage.in / 1e6) * 1 + (usage.out / 1e6) * 5;
 
   // detect ?gmail=connected coming back from OAuth
   useEffect(() => {
@@ -3933,6 +3990,7 @@ BODY:
                     onClick={() => {
                       setAudience(k);
                       setExtraTypes([]);
+                      setMatchShown(120);
                       setLang(k === "CORPORATE_KR" ? "KO" : "EN");
                       setScores({});
                       setDrafts({});
@@ -4133,7 +4191,7 @@ BODY:
               </div>
             </div>
             <div style={{ maxHeight: 560, overflowY: "auto" }}>
-              {scored.map((c, i) => (
+              {scored.slice(0, matchShown).map((c, i) => (
                 <div
                   key={c.id}
                   style={{
@@ -4324,6 +4382,18 @@ BODY:
                   </button>
                 </div>
               ))}
+              {scored.length > matchShown && (
+                <div style={{ padding: "12px 16px", textAlign: "center" }}>
+                  <Btn
+                    small
+                    kind="ghost"
+                    onClick={() => setMatchShown((n) => n + 200)}
+                  >
+                    더 보기 — {Math.min(matchShown, scored.length).toLocaleString()} /{" "}
+                    {scored.length.toLocaleString()}건 표시 중
+                  </Btn>
+                </div>
+              )}
               {excludedScored.length > 0 && (
                 <div
                   style={{
