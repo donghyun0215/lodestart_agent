@@ -565,11 +565,14 @@ function maskEmail(email, staff = false) {
 // out of the scroll container so the card isn't clipped, flipping/shifting
 // when near a viewport edge, and open/close timing that doesn't flicker when
 // the pointer crosses between rows.
-function ContactHoverCard({ contact, staff, children }) {
+function ContactHoverCard({ contact, staff, enabled = true, children }) {
   const c = contact;
   const hasNote = !!(c.notes || "").trim();
+  // Until the pointer reaches this row there is nothing to show, so skip the
+  // Radix machinery entirely and render the row on its own.
+  if (!enabled) return children;
   return (
-    <HoverCard.Root openDelay={180} closeDelay={80}>
+    <HoverCard.Root openDelay={180} closeDelay={80} defaultOpen>
       <HoverCard.Trigger asChild>{children}</HoverCard.Trigger>
       <HoverCard.Portal>
         <HoverCard.Content
@@ -1141,6 +1144,24 @@ export default function App() {
   // old 115-contact corporate pool nobody noticed; with the 1,300+ INVESTOR
   // pool it froze the tab on each re-render — that was Tammy's "자주 멎어요".
   const [matchShown, setMatchShown] = useState(120);
+  // The contacts list was hard-capped at 300 rows with no way to see past it
+  // — Tammy hit exactly that while cleansing data ("300개 이상은 안보이네요").
+  // Paginated instead, so the whole DB is reachable without rendering 3,000
+  // rows (each row carries a Radix HoverCard, which is what made large
+  // renders crawl).
+  const [contactsShown, setContactsShown] = useState(150);
+  const [hoveredContact, setHoveredContact] = useState(null);
+  const hoverTimer = React.useRef(null);
+  // Mirrors Radix's openDelay: the card only arms after the pointer rests on
+  // a row, so sweeping down the list doesn't flash a card per row.
+  const armHover = useCallback((id) => {
+    clearTimeout(hoverTimer.current);
+    hoverTimer.current = setTimeout(() => setHoveredContact(id), 180);
+  }, []);
+  const disarmHover = useCallback(() => {
+    clearTimeout(hoverTimer.current);
+  }, []);
+  useEffect(() => () => clearTimeout(hoverTimer.current), []);
   const [coherence, setCoherence] = useState({}); // contactId -> { ok, reason }
 
   const [audience, setAudience] = useState("CORPORATE_KR");
@@ -1403,7 +1424,12 @@ export default function App() {
   const [contactQuery, setContactQuery] = useState("");
   const [contactTypeFilter, setContactTypeFilter] = useState("ALL");
   const [showAddContact, setShowAddContact] = useState(false);
-  const [newContact, setNewContact] = useState({ email: "", org: "", person: "", title: "", country: "", type: "CORPORATE_KR", notes: "" });
+  // Default must be a type that still exists in TYPE_OPTIONS. It used to be
+  // "CORPORATE_KR", which the taxonomy rename retired — the <select> then had
+  // a value matching no <option>, and the insert wrote an orphan type (or was
+  // rejected outright). That was Tammy's "수동 추가가 안됨".
+  const NEW_CONTACT_BLANK = { email: "", org: "", person: "", title: "", country: "", type: "UNCLASSIFIED", notes: "" };
+  const [newContact, setNewContact] = useState(NEW_CONTACT_BLANK);
   const [dbNote, setDbNote] = useState("");
 
   // Inline contact correction. The imported list has real mistakes in it
@@ -1440,14 +1466,14 @@ export default function App() {
         person: newContact.person.trim(),
         title: newContact.title.trim(),
         country: newContact.country.trim(),
-        type: newContact.type.trim() || "CORPORATE_KR",
+        type: newContact.type.trim() || "UNCLASSIFIED",
         notes: newContact.notes.trim(),
         sendable: "YES",
       };
       const { error } = await supabase.from("contacts").upsert([row], { onConflict: "email" });
       if (error) throw error;
       setDbNote("컨택 1건을 추가했습니다.");
-      setNewContact({ email: "", org: "", person: "", title: "", country: "", type: "CORPORATE_KR", notes: "" });
+      setNewContact(NEW_CONTACT_BLANK);
       await loadContacts();
     } catch (e) {
       setDbNote("추가 실패: " + e.message);
@@ -1831,6 +1857,13 @@ Return ONLY a JSON array, no prose, no markdown:
     }
     setBusy("");
   };
+
+  // Any change to the search or type filter starts the list from the top
+  // again — otherwise a narrowed search would still be paying for a large
+  // previously-expanded page size.
+  useEffect(() => {
+    setContactsShown(150);
+  }, [contactQuery, contactTypeFilter]);
 
   const filteredContacts = useMemo(() => {
     const q = contactQuery.trim().toLowerCase();
@@ -2695,6 +2728,52 @@ BODY:
   // — personal data under Singapore's PDPA. So the file is now built on the
   // server, which re-checks the signed-in account before returning anything.
   // Hiding the button client-side alone would not have been a real control.
+  // Export the current contact view for offline cleansing (Tammy's request).
+  // Exports what the filter/search currently selects — NOT just the rendered
+  // page — so pagination never silently truncates the file.
+  const exportContactsCsv = async () => {
+    const rows = filteredContacts.map((c) => ({
+      email: c.email,
+      org: c.org,
+      person: c.person,
+      title: c.title,
+      country: c.country,
+      type: c.type,
+      notes: c.notes,
+      sendable: c.sendable,
+    }));
+    if (!rows.length) {
+      setDbNote("내보낼 컨택이 없습니다.");
+      return;
+    }
+    setDbNote("");
+    try {
+      const res = await fetch("/api/export", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          rows,
+          kind: "contacts",
+          filename:
+            contactTypeFilter === "ALL" ? "lodestart" : `lodestart_${contactTypeFilter}`,
+        }),
+      });
+      if (!res.ok) {
+        const j = await res.json().catch(() => ({}));
+        setDbNote("⚠ 내보내기 거부됨: " + (j.error || res.status));
+        return;
+      }
+      const blob = await res.blob();
+      const a = document.createElement("a");
+      a.href = URL.createObjectURL(blob);
+      a.download = "lodestart_contacts.csv";
+      a.click();
+      URL.revokeObjectURL(a.href);
+    } catch (e) {
+      setDbNote("내보내기 실패: " + e.message);
+    }
+  };
+
   const exportCsv = async () => {
     const rows = scored
       .filter((c) => drafts[c.id])
@@ -3295,6 +3374,14 @@ BODY:
                     {filteredContacts.length !== contacts.length &&
                       ` / 전체 ${contacts.length.toLocaleString()}건`}
                   </div>
+                  <Btn
+                    small
+                    kind="ghost"
+                    onClick={exportContactsCsv}
+                    disabled={!filteredContacts.length}
+                  >
+                    {account.staff ? "CSV 내보내기" : "CSV 내보내기 🔒"}
+                  </Btn>
                 </div>
 
                 {/* Matching reads the stored company description and nothing
@@ -3350,7 +3437,7 @@ BODY:
                 })()}
 
                 <div style={{ maxHeight: 460, overflowY: "auto" }}>
-                  {filteredContacts.slice(0, 300).map((c) => (
+                  {filteredContacts.slice(0, contactsShown).map((c) => (
                     <div
                       key={c.id}
                       style={{
@@ -3387,8 +3474,21 @@ BODY:
                           The whole block is the hover target — the earlier
                           version only triggered on the truncated text line
                           itself, which was a hard target to hit. */}
-                      <ContactHoverCard contact={c} staff={account.staff}>
-                        <div style={{ flex: "1 1 220px", minWidth: 0, cursor: "default" }}>
+                      {/* Radix HoverCard.Root is not free: mounting one per
+                          row meant hundreds of them alive at once, which is
+                          what made this list crawl. The card is only needed
+                          for the row the pointer is actually on, so the row
+                          tracks hover itself and mounts it on demand. */}
+                      <ContactHoverCard
+                        contact={c}
+                        staff={account.staff}
+                        enabled={hoveredContact === c.id}
+                      >
+                        <div
+                          onMouseEnter={() => armHover(c.id)}
+                          onMouseLeave={disarmHover}
+                          style={{ flex: "1 1 220px", minWidth: 0, cursor: "default" }}
+                        >
                           <div
                             style={{
                               fontWeight: 600,
@@ -3595,17 +3695,16 @@ BODY:
                       )}
                     </div>
                   ))}
-                  {filteredContacts.length > 300 && (
-                    <div
-                      style={{
-                        padding: 14,
-                        textAlign: "center",
-                        fontSize: 11,
-                        color: C.mute,
-                      }}
-                    >
-                      상위 300건만 표시했습니다. 검색으로 좁혀보세요. (매칭에는 필터와 무관하게
-                      전체가 사용됩니다.)
+                  {filteredContacts.length > contactsShown && (
+                    <div style={{ padding: 14, textAlign: "center" }}>
+                      <Btn
+                        small
+                        kind="ghost"
+                        onClick={() => setContactsShown((n) => n + 300)}
+                      >
+                        더 보기 — {contactsShown.toLocaleString()} /{" "}
+                        {filteredContacts.length.toLocaleString()}건 표시 중
+                      </Btn>
                     </div>
                   )}
                 </div>

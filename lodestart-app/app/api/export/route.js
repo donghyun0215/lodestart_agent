@@ -56,23 +56,31 @@ export async function POST(req) {
 
   const rows = Array.isArray(payload?.rows) ? payload.rows : [];
   if (!rows.length) {
-    return Response.json({ error: "내보낼 초안이 없습니다." }, { status: 400 });
+    return Response.json({ error: "내보낼 데이터가 없습니다." }, { status: 400 });
   }
 
-  const columns = ["to", "name", "org", "fit", "bundle", "subject", "body"];
+  // Two shapes go through this route: drafts (the review tab) and the raw
+  // contact list (the contacts tab, for offline data cleansing). Same auth,
+  // same audit log — only the column set differs.
+  const kind = payload?.kind === "contacts" ? "contacts" : "drafts";
+  const columns =
+    kind === "contacts"
+      ? ["email", "org", "person", "title", "country", "type", "notes", "sendable"]
+      : ["to", "name", "org", "fit", "bundle", "subject", "body"];
   const csv = toCsv(rows, columns);
 
   // Audit trail — shows up in Vercel logs.
   console.log(
-    `[export] ${acct.email} exported ${rows.length} rows at ${new Date().toISOString()}`
+    `[export] ${acct.email} exported ${rows.length} ${kind} rows at ${new Date().toISOString()}`
   );
 
   const name = (payload?.filename || "campaign").replace(/[^\w.\-가-힣]/g, "_");
+  const suffix = kind === "contacts" ? "contacts" : "drafts";
   return new Response(csv, {
     status: 200,
     headers: {
       "content-type": "text/csv; charset=utf-8",
-      "content-disposition": `attachment; filename="${name}_drafts.csv"`,
+      "content-disposition": `attachment; filename="${name}_${suffix}.csv"`,
       "cache-control": "no-store",
     },
   });
