@@ -32,6 +32,15 @@ export async function GET(req) {
     "Set-Cookie",
     `g_at=${tok.access_token}; Path=/; HttpOnly; SameSite=Lax; Max-Age=3600`
   );
+  // Google's consent screen lists each scope as its OWN checkbox, and a user
+  // can leave one unticked — the token is still issued, just without that
+  // permission. Recording what was actually granted is the only way to tell
+  // "connected" apart from "connected but can't create drafts", which
+  // otherwise surfaces as a mysterious failure at push time.
+  headers.append(
+    "Set-Cookie",
+    `g_scope=${encodeURIComponent(tok.scope || "")}; Path=/; SameSite=Lax; Max-Age=2592000`
+  );
   if (tok.refresh_token) {
     headers.append(
       "Set-Cookie",

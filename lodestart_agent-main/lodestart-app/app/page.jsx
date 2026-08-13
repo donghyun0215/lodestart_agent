@@ -1191,7 +1191,7 @@ export default function App() {
   const [editNote, setEditNote] = useState("");
   // Who is signed in via Gmail OAuth, and are they on a Lodestart domain?
   // Server-verified in /api/auth/status — this state is only for the UI.
-  const [account, setAccount] = useState({ email: "", staff: false, canDelete: false });
+  const [account, setAccount] = useState({ email: "", staff: false, canDelete: false, canDraft: true, canRead: true });
 
   // Find the most recent campaign for this startup+audience, or create one.
   // Campaign identity is (startup name, audience) — regenerating in a
@@ -1291,7 +1291,15 @@ export default function App() {
       .then((r) => r.json())
       .then((d) => {
         if (d.connected) setGmail((prev) => (prev === "error" ? prev : "connected"));
-        setAccount({ email: d.email || "", staff: !!d.staff, canDelete: !!d.canDelete });
+        setAccount({
+          email: d.email || "",
+          staff: !!d.staff,
+          canDelete: !!d.canDelete,
+          // Absent on an older cookie -> assume fine rather than nagging a
+          // user whose connection actually works.
+          canDraft: d.canDraft !== false,
+          canRead: d.canRead !== false,
+        });
       })
       .catch(() => {});
   }, []);
@@ -2488,6 +2496,13 @@ BODY:
         existingDraftId: gmailDraftIds[c.id] || null,
       }));
     if (!rows.length) return;
+    if (gmail === "connected" && !account.canDraft) {
+      setPushMsg(
+        "Gmail 초안 작성 권한이 없습니다. 상단의 'Gmail 연결'을 다시 누르고, 구글 동의 화면에서 " +
+          "체크박스를 모두 선택한 뒤 계속을 눌러주세요."
+      );
+      return;
+    }
     setBusy("push");
     setPushMsg("");
     try {
@@ -2499,7 +2514,14 @@ BODY:
       if (res.status === 401) {
         setGmail("unknown");
         setPushMsg("Gmail 연결이 필요합니다. 상단의 Gmail 연결 버튼을 눌러주세요.");
-        setBusy("");
+        return;
+      }
+      if (res.status === 403) {
+        // Token exists but lacks gmail.compose — the consent checkbox case.
+        setPushMsg(
+          "Gmail 권한이 부족합니다. 상단의 'Gmail 연결'을 다시 누르고, 구글 동의 화면의 체크박스를 " +
+            "모두 선택해주세요."
+        );
         return;
       }
       const data = await res.json();
@@ -2530,8 +2552,11 @@ BODY:
       setPushMsg(`${ok}건을 Gmail 초안함에 넣었습니다. 검토 후 대시보드에서 발송하거나 Gmail에서 직접 보내세요.`);
     } catch (e) {
       setPushMsg("실패: " + e.message);
+    } finally {
+      // Always clear busy. Without this, any unexpected error left every
+      // button disabled — indistinguishable from the app freezing.
+      setBusy("");
     }
-    setBusy("");
   };
 
   // Real send — actually delivers the email. Requires the draft to already
@@ -2973,14 +2998,39 @@ BODY:
               borderRadius: 5,
               whiteSpace: "nowrap",
               flexShrink: 0,
-              border: `1px solid ${gmail === "connected" ? "#3E7D5A" : "#3A4652"}`,
-              background: gmail === "connected" ? "#1F3B2C" : "transparent",
-              color: gmail === "connected" ? "#B7E4C7" : "#C4D0DA",
+              border: `1px solid ${
+                gmail === "connected"
+                  ? account.canDraft
+                    ? "#3E7D5A"
+                    : "#B3541E"
+                  : "#3A4652"
+              }`,
+              background:
+                gmail === "connected"
+                  ? account.canDraft
+                    ? "#1F3B2C"
+                    : "#3A2413"
+                  : "transparent",
+              color:
+                gmail === "connected"
+                  ? account.canDraft
+                    ? "#B7E4C7"
+                    : "#F0C9A0"
+                  : "#C4D0DA",
               transition: "all .15s",
             }}
+            title={
+              gmail === "connected" && !account.canDraft
+                ? "초안 작성 권한이 없습니다. 다시 연결하면서 동의 화면의 체크박스를 모두 선택해주세요."
+                : undefined
+            }
           >
             <Mail size={13} />
-            {gmail === "connected" ? "Gmail 연결됨" : "Gmail 연결"}
+            {gmail !== "connected"
+              ? "Gmail 연결"
+              : account.canDraft
+              ? "Gmail 연결됨"
+              : "⚠ 권한 부족 — 다시 연결"}
           </a>
 
           <div style={{ display: "flex", gap: 16 }}>

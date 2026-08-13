@@ -15,6 +15,9 @@ export const runtime = "nodejs";
 import { staffDomains, resolveAccount, canDelete } from "../../../../lib/staff";
 
 export async function GET(req) {
+  const cookieHeader = req.headers.get("cookie") || "";
+  const scopeRaw = /(?:^|;\s*)g_scope=([^;]*)/.exec(cookieHeader)?.[1] || "";
+  const granted = decodeURIComponent(scopeRaw);
   const cookie = req.headers.get("cookie") || "";
   const hasAccess = /(?:^|;\s*)g_at=/.test(cookie);
   const hasRefresh = /(?:^|;\s*)g_rt=/.test(cookie);
@@ -28,6 +31,10 @@ export async function GET(req) {
     email: acct.email,
     staff: acct.staff,
     canDelete: canDelete(acct.email),
+    // What Google actually granted, so the UI can distinguish a healthy
+    // connection from one that will fail at draft-creation time.
+    canDraft: granted.includes("gmail.compose"),
+    canRead: granted.includes("gmail.readonly"),
     domains: staffDomains(),
   });
 }
