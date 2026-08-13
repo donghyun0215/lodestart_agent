@@ -1265,6 +1265,20 @@ export default function App() {
   // Default CC on every outgoing draft — Tammy's request: support@ stays in
   // the loop on all outreach. Editable in the review tab; empty disables.
   const [ccAddr, setCcAddr] = useState("support@lodestart.ai");
+  // Campaign mode. "match" = the precise per-contact pipeline (score, top-N
+  // personalised drafts, 4-startup bundle cap). "showcase" = Tammy's bulky
+  // cohort announcement: one shared body introducing the whole lineup, sent
+  // wide — the genre she hand-built in Mailmeteor, now with tracking and an
+  // optional per-recipient opening line Mailmeteor can't do.
+  const [campMode, setCampMode] = useState("match");
+  const [showcase, setShowcase] = useState({
+    theme: "",
+    eventLine: "",
+    list: [{ name: "", oneLiner: "", link: "" }],
+    hook: true,
+    unsub: true,
+    limit: "200",
+  });
   const [limit, setLimit] = useState("15"); // free text while typing — validated on run, not per keystroke
   const limitNum = parseInt(limit, 10);
   const [lang, setLang] = useState("EN"); // EN | KO
@@ -1296,12 +1310,15 @@ export default function App() {
   // set is joined into one key so a bundled run doesn't collide with, or
   // overwrite, the single-startup runs it was built from.
   const campaignKey = () =>
-    allStartups.length > 1
+    campMode === "showcase"
+      ? `[쇼케이스] ${showcase.theme.trim()}`
+      : allStartups.length > 1
       ? allStartups.map((t) => t.name).sort().join(" + ")
       : startup.name;
 
   const getOrCreateCampaignId = async () => {
-    if (!startup.name) return null;
+    if (campMode === "showcase" ? !showcase.theme.trim() : !startup.name)
+      return null;
     const { data: found, error: findErr } = await supabase
       .from("campaigns")
       .select("id")
@@ -1426,6 +1443,20 @@ export default function App() {
         if (p.lang) setLang(p.lang);
         if (p.tab) setTab(p.tab);
         if (typeof p.ccAddr === "string") setCcAddr(p.ccAddr);
+        if (p.campMode === "showcase" || p.campMode === "match") setCampMode(p.campMode);
+        if (p.showcase && Array.isArray(p.showcase.list) && p.showcase.list.length)
+          setShowcase({
+            theme: p.showcase.theme || "",
+            eventLine: p.showcase.eventLine || "",
+            list: p.showcase.list.map((r) => ({
+              name: r.name || "",
+              oneLiner: r.oneLiner || "",
+              link: r.link || "",
+            })),
+            hook: p.showcase.hook !== false,
+            unsub: p.showcase.unsub !== false,
+            limit: String(p.showcase.limit || "200"),
+          });
         if (Array.isArray(p.extraTypes))
           setExtraTypes(
             p.extraTypes.map((t) =>
@@ -1459,8 +1490,8 @@ export default function App() {
   // (and so the campaign-restore effect below knows where to look).
   useEffect(() => {
     if (!ready) return;
-    saveKey(K.prefs, { audience, lang, tab, extraTypes, ccAddr });
-  }, [ready, audience, lang, tab, extraTypes, ccAddr]);
+    saveKey(K.prefs, { audience, lang, tab, extraTypes, ccAddr, campMode, showcase });
+  }, [ready, audience, lang, tab, extraTypes, ccAddr, campMode, showcase]);
 
   // Restore a previous campaign's matches/drafts/statuses from the DB when
   // landing on a startup+audience that already has saved work. Without
@@ -2448,6 +2479,160 @@ BODY:
     // Keep the untouched AI version. commitEdit() diffs against this, not
     // against the live textarea value (see the bug note in commitEdit).
     return { ...p, orig: p.body, edited: false, usedStartup: target.name };
+  };
+
+  // Showcase mode: one shared cohort-announcement email for the whole pool.
+  // One AI call writes the base (with {{NAME}}/{{ORG}} tokens); optionally a
+  // cheap batched pass writes a single personalised opening line per
+  // recipient. Everything downstream — review, CC, Gmail push, send,
+  // tracking — is the existing pipeline, which is the point.
+  const runShowcase = async () => {
+    const sc = showcase;
+    if (!sc.theme.trim()) {
+      setErr("쇼케이스 주제를 입력하세요 (예: 2026 K-Marine 테크 델리게이션).");
+      return;
+    }
+    const lineup = sc.list.filter((r) => r.name.trim() && r.oneLiner.trim());
+    if (!lineup.length) {
+      setErr("스타트업을 최소 1개 입력하세요 (이름 + 한 줄 소개).");
+      return;
+    }
+    const cap = Math.max(1, Math.min(1000, Number(sc.limit) || 200));
+    const recips = pool.slice(0, cap);
+    if (!recips.length) {
+      setErr("이 유형의 컨택이 없습니다.");
+      return;
+    }
+    setBusy("showcase");
+    setProgress(0);
+    setErr("");
+    try {
+      const lineupText = lineup
+        .map(
+          (r, i) =>
+            `${i + 1}. ${r.name.trim()} — ${r.oneLiner.trim()}${
+              r.link.trim() ? ` | ${r.link.trim()}` : ""
+            }`
+        )
+        .join("\n");
+      const base = parseJSON(
+        await claude(
+          `You write a cohort-announcement outreach email introducing multiple Korean startups at once.
+
+SENDER: ${sender.name}, ${sender.title} — ${sender.org}
+AUDIENCE: ${AUDIENCES[audience].label} (goal: ${AUDIENCES[audience].goal})
+THEME: ${sc.theme.trim()}
+${sc.eventLine.trim() ? `EVENT / CTA LINE: ${sc.eventLine.trim()}` : ""}
+STARTUP LINEUP (${lineup.length}):
+${lineupText}
+
+Rules:
+- Language: ${lang === "KO" ? "Korean (존댓말)" : "English"}.
+- This is intentionally a broad announcement, not a personalised pitch — do NOT pretend deep personal relevance.
+- Open with the literal token {{NAME}} as the greeting name and you may use {{ORG}} once; do not invent other tokens.
+- 180-260 words. Short intro (why this cohort, in one or two sentences), then the lineup as a clean list — each startup on its own line with its one-liner${"" /* links included if given */} and link if provided, then one clear call to action${sc.eventLine.trim() ? " built around the EVENT line" : ""}.
+- No flattery, no "I hope this finds you well", no invented facts.
+
+Return ONLY JSON, no markdown: {"subject":"...","body":"..."}`,
+          1800
+        )
+      );
+      if (!base.subject || !base.body) throw new Error("본문 생성 결과가 비었습니다.");
+
+      // Optional per-recipient opening line — the one thing a mail-merge
+      // blast can't do. Batched like matching; a contact with nothing to
+      // hook on gets "" and falls back to the shared opening.
+      const hooks = {};
+      if (sc.hook) {
+        const BATCH = 20;
+        const CONC = 4;
+        const batches = [];
+        for (let i = 0; i < recips.length; i += BATCH)
+          batches.push(recips.slice(i, i + BATCH));
+        let done = 0;
+        for (let w = 0; w < batches.length; w += CONC) {
+          const wave = batches.slice(w, w + CONC);
+          await Promise.all(
+            wave.map(async (chunk) => {
+              const list = chunk
+                .map(
+                  (c, j) =>
+                    `${j}. org="${c.org}" | title="${c.title}" | country="${c.country}" | note="${(c.notes || "").slice(0, 200)}"`
+                )
+                .join("\n");
+              try {
+                const out = await claude(
+                  `THEME: ${sc.theme.trim()} — a showcase of Korean startups (${lineup
+                    .map((r) => r.name)
+                    .join(", ")}) for ${AUDIENCES[audience].label}.
+
+For each contact below, write ONE natural opening sentence in ${
+                    lang === "KO" ? "Korean (존댓말)" : "English"
+                  } that connects THEIR org to why this lineup might interest them. Max 22 words. Use only facts present in their fields. If nothing specific can be said honestly, return an empty string for that contact.
+
+CONTACTS:
+${list}
+
+Return ONLY a JSON array: [{"i":0,"line":"..."}]`,
+                  1400
+                );
+                parseJSON(out).forEach((r) => {
+                  const c = chunk[r.i];
+                  if (c && r.line) hooks[c.id] = String(r.line).trim();
+                });
+              } catch {
+                /* a failed hook batch just falls back to the shared opening */
+              }
+              done += 1;
+              setProgress(Math.round((done / batches.length) * 90));
+            })
+          );
+        }
+      }
+
+      const unsubLine =
+        lang === "KO"
+          ? "\n\n—\n이러한 소식을 더 받고 싶지 않으시면 이 메일에 회신으로 알려주세요."
+          : "\n\nIf you'd prefer not to receive updates like this, just reply to let us know.";
+
+      const next = { ...drafts };
+      const ns = { ...scores };
+      const cid = await getOrCreateCampaignId();
+      recips.forEach((c) => {
+        const nm = (c.person || "").trim()
+          ? (c.person || "").trim()
+          : lang === "KO"
+          ? "담당자님"
+          : "there";
+        let body = base.body
+          .replaceAll("{{NAME}}", nm)
+          .replaceAll("{{ORG}}", c.org || "");
+        const hk = hooks[c.id];
+        if (hk) body = hk + "\n\n" + body;
+        if (sc.unsub) body += unsubLine;
+        next[c.id] = { subject: base.subject, body };
+        // A neutral placeholder so the review/push pipeline (which iterates
+        // scored contacts) picks these up — explicitly labelled as not a
+        // match score.
+        if (!ns[c.id]) ns[c.id] = { score: 50, reason: "쇼케이스 발송 대상 (매칭 점수 아님)" };
+        if (cid)
+          persistSend(cid, c, {
+            subject: base.subject,
+            body,
+            status: sendStatus[c.id] || "draft",
+          });
+      });
+      setDrafts(next);
+      setScores(ns);
+      setProgress(100);
+      setTab("review");
+      setOpenId(recips[0].id);
+    } catch (e) {
+      setErr("쇼케이스 생성 실패: " + e.message);
+    } finally {
+      setBusy("");
+      setProgress(0);
+    }
   };
 
   const runDrafts = async () => {
@@ -4126,6 +4311,48 @@ BODY:
 
             <Card>
               <H sub="이 메일을 무슨 목적으로 보내는지 고르고, 아래 체크박스로 대상 유형을 넓힐 수 있습니다.">캠페인</H>
+              {/* Two genres of outreach, deliberately separate: precise
+                  matching (few startups, per-contact fit) vs a broad
+                  showcase (many startups, one shared announcement). */}
+              <div
+                style={{
+                  display: "flex",
+                  gap: 6,
+                  marginBottom: 14,
+                  padding: 4,
+                  background: "#EEF2F5",
+                  borderRadius: 10,
+                }}
+              >
+                {[
+                  ["match", "정밀 매칭", "스타트업 1~4개 · 컨택별 적합도 채점 · 개인화 초안"],
+                  ["showcase", "쇼케이스 발송", "스타트업 개수 제한 없음 · 공용 소개 메일 · 대량 발송"],
+                ].map(([m, label, hint]) => (
+                  <button
+                    key={m}
+                    onClick={() => setCampMode(m)}
+                    title={hint}
+                    style={{
+                      flex: 1,
+                      padding: "9px 10px",
+                      borderRadius: 8,
+                      border: `1px solid ${campMode === m ? "#1B453A" : "transparent"}`,
+                      background:
+                        campMode === m
+                          ? "linear-gradient(180deg, #2A6654 0%, #1E4C3F 100%)"
+                          : "transparent",
+                      color: campMode === m ? "#fff" : C.mute,
+                      fontFamily: "Inter, sans-serif",
+                      fontSize: 12.5,
+                      fontWeight: 600,
+                      cursor: "pointer",
+                      transition: "all .15s",
+                    }}
+                  >
+                    {label}
+                  </button>
+                ))}
+              </div>
               {audience === "TEST" && (
                 <div
                   style={{
@@ -4268,33 +4495,207 @@ BODY:
                 );
               })()}
 
-              <div style={{ marginTop: 16 }}>
-                <Field
-                  label={`초안 개수 (상위 ${
-                    Number.isFinite(limitNum) && limitNum > 0 ? limitNum : "?"
-                  }명)`}
-                  value={limit}
-                  onChange={(v) => setLimit(v.replace(/[^0-9]/g, ""))}
-                  mono
-                />
-                {limit !== "" &&
-                  (!Number.isFinite(limitNum) || limitNum <= 0) && (
-                    <div style={{ fontSize: 11, color: C.alert, marginTop: -8, marginBottom: 10 }}>
-                      1 이상의 숫자를 입력하세요.
+              {campMode === "match" && (
+                <>
+                  <div style={{ marginTop: 16 }}>
+                    <Field
+                      label={`초안 개수 (상위 ${
+                        Number.isFinite(limitNum) && limitNum > 0 ? limitNum : "?"
+                      }명)`}
+                      value={limit}
+                      onChange={(v) => setLimit(v.replace(/[^0-9]/g, ""))}
+                      mono
+                    />
+                    {limit !== "" &&
+                      (!Number.isFinite(limitNum) || limitNum <= 0) && (
+                        <div style={{ fontSize: 11, color: C.alert, marginTop: -8, marginBottom: 10 }}>
+                          1 이상의 숫자를 입력하세요.
+                        </div>
+                      )}
+                  </div>
+
+                  <Btn onClick={runMatch} disabled={!pool.length || !!busy}>
+                    {pool.length}명 매칭 스코어링
+                    {allStartups.length > 1 && ` · 스타트업 ${allStartups.length}개`}
+                  </Btn>
+                  {allStartups.length > 1 && (
+                    <div style={{ fontSize: 11, color: C.mute, marginTop: 8 }}>
+                      스타트업마다 따로 채점합니다 — 시간이 스타트업 수만큼 늘어납니다.
                     </div>
                   )}
-              </div>
+                </>
+              )}
 
-              <Btn
-                onClick={runMatch}
-                disabled={!pool.length || !!busy}
-              >
-                {pool.length}명 매칭 스코어링
-                {allStartups.length > 1 && ` · 스타트업 ${allStartups.length}개`}
-              </Btn>
-              {allStartups.length > 1 && (
-                <div style={{ fontSize: 11, color: C.mute, marginTop: 8 }}>
-                  스타트업마다 따로 채점합니다 — 시간이 스타트업 수만큼 늘어납니다.
+              {campMode === "showcase" && (
+                <div style={{ marginTop: 16 }}>
+                  <Field
+                    label="쇼케이스 주제 (필수)"
+                    value={showcase.theme}
+                    onChange={(v) => setShowcase({ ...showcase, theme: v })}
+                    ph="예: 2026 K-Marine 테크 한국 스타트업 델리게이션"
+                  />
+                  <Field
+                    label="행사·CTA 한 줄 (선택 — 날짜/장소/RSVP 링크)"
+                    value={showcase.eventLine}
+                    onChange={(v) => setShowcase({ ...showcase, eventLine: v })}
+                    ph="예: 9/2(화) Suntec, K-Marine Open Innovation Day — RSVP: https://…"
+                  />
+
+                  <div
+                    style={{
+                      fontFamily: "Inter, sans-serif",
+                      fontSize: 11,
+                      fontWeight: 600,
+                      letterSpacing: "0.06em",
+                      textTransform: "uppercase",
+                      color: C.mute,
+                      marginBottom: 6,
+                    }}
+                  >
+                    스타트업 라인업 ({showcase.list.filter((r) => r.name.trim()).length}개)
+                  </div>
+                  {showcase.list.map((r, i) => (
+                    <div
+                      key={i}
+                      style={{ display: "flex", gap: 6, marginBottom: 6, alignItems: "center" }}
+                    >
+                      <input
+                        value={r.name}
+                        placeholder="이름"
+                        onChange={(e) =>
+                          setShowcase({
+                            ...showcase,
+                            list: showcase.list.map((x, j) =>
+                              j === i ? { ...x, name: e.target.value } : x
+                            ),
+                          })
+                        }
+                        style={{ ...inputStyle(false), width: 130, flexShrink: 0 }}
+                      />
+                      <input
+                        value={r.oneLiner}
+                        placeholder="한 줄 소개"
+                        onChange={(e) =>
+                          setShowcase({
+                            ...showcase,
+                            list: showcase.list.map((x, j) =>
+                              j === i ? { ...x, oneLiner: e.target.value } : x
+                            ),
+                          })
+                        }
+                        style={{ ...inputStyle(false), flex: 1 }}
+                      />
+                      <input
+                        value={r.link}
+                        placeholder="링크(선택)"
+                        onChange={(e) =>
+                          setShowcase({
+                            ...showcase,
+                            list: showcase.list.map((x, j) =>
+                              j === i ? { ...x, link: e.target.value } : x
+                            ),
+                          })
+                        }
+                        style={{ ...inputStyle(true), width: 150, flexShrink: 0 }}
+                      />
+                      <button
+                        onClick={() =>
+                          setShowcase({
+                            ...showcase,
+                            list: showcase.list.filter((_, j) => j !== i),
+                          })
+                        }
+                        title="줄 삭제"
+                        style={{
+                          width: 26,
+                          height: 26,
+                          flexShrink: 0,
+                          border: `1px solid ${C.line}`,
+                          borderRadius: 5,
+                          background: "transparent",
+                          color: C.mute,
+                          cursor: "pointer",
+                        }}
+                      >
+                        ×
+                      </button>
+                    </div>
+                  ))}
+                  <div style={{ display: "flex", gap: 8, marginBottom: 14 }}>
+                    <Btn
+                      small
+                      kind="ghost"
+                      onClick={() =>
+                        setShowcase({
+                          ...showcase,
+                          list: [...showcase.list, { name: "", oneLiner: "", link: "" }],
+                        })
+                      }
+                    >
+                      + 줄 추가
+                    </Btn>
+                    <Btn
+                      small
+                      kind="ghost"
+                      onClick={() => {
+                        const fromProfiles = (allStartups.length ? allStartups : [startup])
+                          .filter((t) => t.name.trim())
+                          .map((t) => ({
+                            name: t.name,
+                            oneLiner: t.oneLiner || "",
+                            link: t.link || "",
+                          }));
+                        if (fromProfiles.length)
+                          setShowcase({ ...showcase, list: fromProfiles });
+                      }}
+                    >
+                      프로필에서 가져오기
+                    </Btn>
+                  </div>
+
+                  <label
+                    style={{ display: "flex", gap: 8, alignItems: "center", fontSize: 12.5, color: C.ink, marginBottom: 6, cursor: "pointer" }}
+                  >
+                    <input
+                      type="checkbox"
+                      checked={showcase.hook}
+                      onChange={(e) => setShowcase({ ...showcase, hook: e.target.checked })}
+                    />
+                    수신자별 첫 문장 개인화 (AI가 각 회사에 맞는 오프닝 한 줄 작성 — 권장)
+                  </label>
+                  <label
+                    style={{ display: "flex", gap: 8, alignItems: "center", fontSize: 12.5, color: C.ink, marginBottom: 12, cursor: "pointer" }}
+                  >
+                    <input
+                      type="checkbox"
+                      checked={showcase.unsub}
+                      onChange={(e) => setShowcase({ ...showcase, unsub: e.target.checked })}
+                    />
+                    수신거부 안내 문구 포함 (대량 발송 시 권장 — 스팸법 대응)
+                  </label>
+
+                  <Field
+                    label={`발송 대상 수 (현재 풀 ${pool.length.toLocaleString()}명 중 앞에서부터)`}
+                    value={showcase.limit}
+                    onChange={(v) =>
+                      setShowcase({ ...showcase, limit: v.replace(/[^0-9]/g, "") })
+                    }
+                    mono
+                  />
+
+                  <Btn onClick={runShowcase} disabled={!pool.length || !!busy}>
+                    {busy === "showcase"
+                      ? "생성 중…"
+                      : `쇼케이스 초안 ${Math.min(
+                          pool.length,
+                          Math.max(1, Math.min(1000, Number(showcase.limit) || 200))
+                        ).toLocaleString()}건 생성`}
+                  </Btn>
+                  <div style={{ fontSize: 11, color: C.mute, marginTop: 8, lineHeight: 1.6 }}>
+                    공용 본문 1회 생성 후 수신자별로 이름·회사가 치환됩니다. 실제 발송 시
+                    Gmail 일일 한도(개인 ~500 / Workspace ~2,000통)를 넘지 않게 나눠
+                    보내세요.
+                  </div>
                 </div>
               )}
               {orglessCount > 0 && (
