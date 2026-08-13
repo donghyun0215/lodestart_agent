@@ -540,6 +540,102 @@ function RichBody({ draft, onHtml }) {
   );
 }
 
+// Inline contact editor. Its draft lives in LOCAL state on purpose: the app
+// is one big component, so when this state lived at the top (editRow), every
+// keystroke re-rendered the entire app — contact list, hover machinery, all
+// of it. On Tammy's machine, with Korean IME firing several updates per
+// syllable, that read as "수정할 때 뻑". Local state means typing re-renders
+// this panel and nothing else; React.memo keeps list-wide renders out.
+const ContactEditPanel = React.memo(function ContactEditPanel({
+  contact,
+  staff,
+  canDelete,
+  busy,
+  onSave,
+  onCancel,
+  onDelete,
+}) {
+  const c = contact;
+  const [row, setRow] = React.useState({
+    org: c.org || "",
+    person: c.person || "",
+    title: c.title || "",
+    country: c.country || "",
+    type: c.type || "UNCLASSIFIED",
+    notes: c.notes || "",
+  });
+  return (
+    <div style={{ padding: "4px 16px 14px" }}>
+      <div
+        style={{
+          display: "grid",
+          gridTemplateColumns: "repeat(auto-fit,minmax(180px,1fr))",
+          gap: 12,
+        }}
+      >
+        <Field label="회사" value={row.org} onChange={(v) => setRow({ ...row, org: v })} />
+        <Field label="담당자" value={row.person} onChange={(v) => setRow({ ...row, person: v })} />
+        <Field label="직함" value={row.title} onChange={(v) => setRow({ ...row, title: v })} />
+        <Field label="국가" value={row.country} onChange={(v) => setRow({ ...row, country: v })} />
+        <label style={{ display: "block", marginBottom: 14 }}>
+          <div
+            style={{
+              fontFamily: "Inter, sans-serif",
+              fontSize: 11,
+              fontWeight: 600,
+              letterSpacing: "0.06em",
+              textTransform: "uppercase",
+              color: C.mute,
+              marginBottom: 5,
+            }}
+          >
+            유형
+          </div>
+          <select
+            value={row.type}
+            onChange={(e) => setRow({ ...row, type: e.target.value })}
+            style={inputStyle(false)}
+          >
+            {TYPE_OPTIONS.map((t) => (
+              <option key={t} value={t}>
+                {typeLabel(t)}
+              </option>
+            ))}
+            {!TYPE_OPTIONS.includes(row.type) && row.type && (
+              <option value={row.type}>{row.type}</option>
+            )}
+          </select>
+        </label>
+      </div>
+      <Field
+        label="회사 설명 (매칭 근거로 사용됩니다)"
+        value={row.notes}
+        area
+        rows={2}
+        onChange={(v) => setRow({ ...row, notes: v })}
+      />
+      <div style={{ display: "flex", gap: 8 }}>
+        <Btn small onClick={() => onSave(row)} disabled={!!busy}>
+          {busy === "contact" ? "저장 중…" : "저장"}
+        </Btn>
+        <Btn small kind="ghost" onClick={onCancel}>
+          취소
+        </Btn>
+        <div style={{ alignSelf: "center", fontSize: 11, color: C.mute }}>
+          {maskEmail(c.email, staff)}
+        </div>
+        {canDelete && (
+          <div style={{ marginLeft: "auto" }}>
+            <Btn small kind="danger" onClick={onDelete} disabled={!!busy}>
+              DB에서 삭제
+            </Btn>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+});
+
 function maskEmail(email, staff = false) {
   if (!email) return "";
   // Staff (lodestart.ai Gmail login, verified server-side by /api/auth/status)
@@ -1445,19 +1541,8 @@ export default function App() {
   // handful of rows this is quicker than editing a CSV; for a systematic fix
   // across hundreds, re-uploading a corrected CSV still upserts by email.
   const [editingId, setEditingId] = useState(null);
-  const [editRow, setEditRow] = useState(null);
 
-  const startEditContact = (c) => {
-    setEditingId(c.id);
-    setEditRow({
-      org: c.org,
-      person: c.person,
-      title: c.title,
-      country: c.country,
-      type: c.type,
-      notes: c.notes,
-    });
-  };
+  const startEditContact = (c) => setEditingId(c.id);
 
   // Add one new contact to the DB via the form.
   const addContact = async () => {
@@ -1485,8 +1570,9 @@ export default function App() {
       await loadContacts();
     } catch (e) {
       setDbNote("추가 실패: " + e.message);
+    } finally {
+      setBusy("");
     }
-    setBusy("");
   };
 
   // Permanently remove a contact from the DB. Server-verified allowlist
@@ -1514,30 +1600,31 @@ export default function App() {
       setDbNote(`"${c.org || c.email}" 컨택을 삭제했습니다.`);
     } catch (e) {
       setDbNote("삭제 실패: " + e.message);
+    } finally {
+      setBusy("");
     }
-    setBusy("");
   };
 
-  const saveContact = async () => {
-    if (!editingId || !editRow) return;
+  const saveContact = async (id, row) => {
+    if (!id || !row) return;
     setBusy("contact");
     try {
-      const patch = { ...editRow, updated_at: new Date().toISOString() };
+      const patch = { ...row, updated_at: new Date().toISOString() };
       const { error } = await supabase
         .from("contacts")
         .update(patch)
-        .eq("id", editingId);
+        .eq("id", id);
       if (error) throw error;
       setContacts((prev) =>
-        prev.map((c) => (c.id === editingId ? { ...c, ...editRow } : c))
+        prev.map((c) => (c.id === id ? { ...c, ...row } : c))
       );
       setDbNote("컨택 정보를 수정했습니다.");
       setEditingId(null);
-      setEditRow(null);
     } catch (e) {
       setDbNote("수정 실패: " + e.message);
+    } finally {
+      setBusy("");
     }
-    setBusy("");
   };
 
   // Fill in missing company descriptions by actually looking the companies up.
@@ -1715,8 +1802,9 @@ Return ONLY a JSON array, no prose, no markdown:
           e.message +
           " — Supabase 설정(.env.local, supabase_schema.sql 실행 여부)을 확인하세요."
       );
+    } finally {
+      setBusy("");
     }
-    setBusy("");
   };
 
   // Load contacts from the DB once on mount.
@@ -1834,8 +1922,9 @@ Return ONLY a JSON array, no prose, no markdown:
         );
     } catch (e2) {
       setErr("링크 추출 실패: " + e2.message);
+    } finally {
+      setBusy("");
     }
-    setBusy("");
   };
 
   const onDeck = async (e) => {
@@ -1862,8 +1951,9 @@ Return ONLY a JSON array, no prose, no markdown:
       setStartup((prev) => mergeExtract(j, prev));
     } catch (e2) {
       setErr("IR 추출 실패: " + e2.message + " — 직접 입력하거나 다른 파일을 시도하세요.");
+    } finally {
+      setBusy("");
     }
-    setBusy("");
   };
 
   // Any change to the search or type filter starts the list from the top
@@ -1872,6 +1962,21 @@ Return ONLY a JSON array, no prose, no markdown:
   useEffect(() => {
     setContactsShown(150);
   }, [contactQuery, contactTypeFilter]);
+
+  // Last-resort unlock: if any promise rejection escapes a handler, clear
+  // the busy flag and say so instead of leaving the whole UI disabled —
+  // a stuck busy flag is indistinguishable from the app freezing.
+  useEffect(() => {
+    const h = (ev) => {
+      setBusy("");
+      setErr(
+        "작업 중 오류가 발생했습니다: " +
+          (ev?.reason?.message || String(ev?.reason || "unknown"))
+      );
+    };
+    window.addEventListener("unhandledrejection", h);
+    return () => window.removeEventListener("unhandledrejection", h);
+  }, []);
 
   const filteredContacts = useMemo(() => {
     const q = contactQuery.trim().toLowerCase();
@@ -2033,6 +2138,21 @@ Inside "reason" use only plain text — no double quotes, no line breaks, no col
     try {
       let done = 0;
       const totalUnits = batches.length * targets.length;
+      // Progress (a number) updates on every batch — that's cheap. The
+      // expensive pushes are multiScores/scores: each one clones the whole
+      // accumulating map, recomputes best-of, and re-sorts the result list.
+      // Doing that 270+ times in a 4-startup INVESTOR run (in bursts of
+      // CONCURRENCY) locked the main thread for seconds at a time — Tammy's
+      // "매칭 4개 돌리면 뻑". Throttled to ~1.5s; a final forced push after
+      // the loop delivers the complete result.
+      let lastUiPush = 0;
+      const pushScores = (force = false) => {
+        const now = Date.now();
+        if (!force && now - lastUiPush < 1500) return;
+        lastUiPush = now;
+        setMultiScores({ ...multi });
+        setScores(bestOf(multi));
+      };
       for (const target of targets) {
         // run batches in parallel waves of CONCURRENCY
         for (let w = 0; w < batches.length; w += CONCURRENCY) {
@@ -2041,14 +2161,14 @@ Inside "reason" use only plain text — no double quotes, no line breaks, no col
             wave.map((chunk) =>
               scoreBatch(chunk, target).then(() => {
                 done += 1;
-                setMultiScores({ ...multi });
-                setScores(bestOf(multi));
                 setProgress(Math.min(100, Math.round((done / totalUnits) * 100)));
+                pushScores();
               })
             )
           );
         }
       }
+      pushScores(true);
       await saveKey(K.multi, multi);
       setBundleOff({});
       await saveKey(K.bundleOff, {});
@@ -2056,8 +2176,9 @@ Inside "reason" use only plain text — no double quotes, no line breaks, no col
       if (targets.length > 1) checkCoherence(multi);
     } catch (e) {
       setErr("매칭 실패: " + e.message);
+    } finally {
+      setBusy("");
     }
-    setBusy("");
   };
 
   // For every contact whose qualifying startups (>=BUNDLE_MIN) number 2+,
@@ -2366,8 +2487,9 @@ BODY:
       setOpenId(top[0].id);
     } catch (e) {
       setErr("초안 생성 실패: " + e.message);
+    } finally {
+      setBusy("");
     }
-    setBusy("");
   };
 
   /* ---------------------------- learning loop -------------------------- */
@@ -2438,8 +2560,9 @@ BODY:
       );
     } catch (e) {
       setErr("재생성 실패: " + e.message);
+    } finally {
+      setBusy("");
     }
-    setBusy("");
   };
 
   const updateExtra = (k, patch) =>
@@ -2472,8 +2595,9 @@ BODY:
       );
     } catch (e2) {
       setErr("IR 추출 실패: " + e2.message + " — 직접 입력하거나 다른 파일을 시도하세요.");
+    } finally {
+      setBusy("");
     }
-    setBusy("");
   };
 
   const saveStartup = async () => {
@@ -2599,8 +2723,9 @@ BODY:
       );
     } catch (e) {
       setPushMsg("발송 실패: " + e.message);
+    } finally {
+      setBusy("");
     }
-    setBusy("");
   };
 
   const sendOneNow = (id) => {
@@ -3617,9 +3742,7 @@ BODY:
                       </button>
                       <button
                         onClick={() =>
-                          editingId === c.id
-                            ? (setEditingId(null), setEditRow(null))
-                            : startEditContact(c)
+                          editingId === c.id ? setEditingId(null) : startEditContact(c)
                         }
                         style={{
                           flexShrink: 0,
@@ -3636,112 +3759,16 @@ BODY:
                       </button>
                      </div>
 
-                      {editingId === c.id && editRow && (
-                        <div style={{ padding: "4px 16px 14px" }}>
-                          <div
-                            style={{
-                              display: "grid",
-                              gridTemplateColumns: "repeat(auto-fit,minmax(180px,1fr))",
-                              gap: 12,
-                            }}
-                          >
-                            <Field
-                              label="회사"
-                              value={editRow.org}
-                              onChange={(v) => setEditRow({ ...editRow, org: v })}
-                            />
-                            <Field
-                              label="담당자"
-                              value={editRow.person}
-                              onChange={(v) => setEditRow({ ...editRow, person: v })}
-                            />
-                            <Field
-                              label="직함"
-                              value={editRow.title}
-                              onChange={(v) => setEditRow({ ...editRow, title: v })}
-                            />
-                            <Field
-                              label="국가"
-                              value={editRow.country}
-                              onChange={(v) => setEditRow({ ...editRow, country: v })}
-                            />
-                            <label style={{ display: "block", marginBottom: 14 }}>
-                              <div
-                                style={{
-                                  fontFamily: "Inter, sans-serif",
-                                  fontSize: 11,
-                                  fontWeight: 600,
-                                  letterSpacing: "0.06em",
-                                  textTransform: "uppercase",
-                                  color: C.mute,
-                                  marginBottom: 5,
-                                }}
-                              >
-                                유형
-                              </div>
-                              <select
-                                value={editRow.type}
-                                onChange={(e) =>
-                                  setEditRow({ ...editRow, type: e.target.value })
-                                }
-                                style={inputStyle(false)}
-                              >
-                                {TYPE_OPTIONS.map((t) => (
-                                  <option key={t} value={t}>
-                                    {typeLabel(t)}
-                                  </option>
-                                ))}
-                                {!TYPE_OPTIONS.includes(editRow.type) &&
-                                  editRow.type && (
-                                    <option value={editRow.type}>{editRow.type}</option>
-                                  )}
-                              </select>
-                            </label>
-                          </div>
-                          <Field
-                            label="회사 설명 (매칭 근거로 사용됩니다)"
-                            value={editRow.notes}
-                            area
-                            rows={2}
-                            onChange={(v) => setEditRow({ ...editRow, notes: v })}
-                          />
-                          <div style={{ display: "flex", gap: 8 }}>
-                            <Btn small onClick={saveContact} disabled={!!busy}>
-                              {busy === "contact" ? "저장 중…" : "저장"}
-                            </Btn>
-                            <Btn
-                              small
-                              kind="ghost"
-                              onClick={() => {
-                                setEditingId(null);
-                                setEditRow(null);
-                              }}
-                            >
-                              취소
-                            </Btn>
-                            <div
-                              style={{
-                                alignSelf: "center",
-                                fontSize: 11,
-                                color: C.mute,
-                              }}
-                            >
-                              {maskEmail(c.email, account.staff)}
-                            </div>
-                            {account.canDelete && (
-                              <div style={{ marginLeft: "auto" }}>
-                                <Btn
-                                  small
-                                  kind="danger"
-                                  onClick={() => deleteContact(c)}
-                                  disabled={!!busy}
-                                >
-                                  DB에서 삭제
-                                </Btn>
-                              </div>
-                            )}
-                          </div>
-                        </div>
+                      {editingId === c.id && (
+                        <ContactEditPanel
+                          contact={c}
+                          staff={account.staff}
+                          canDelete={account.canDelete}
+                          busy={busy}
+                          onSave={(row) => saveContact(c.id, row)}
+                          onCancel={() => setEditingId(null)}
+                          onDelete={() => deleteContact(c)}
+                        />
                       )}
                     </div>
                   ))}
