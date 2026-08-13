@@ -1271,6 +1271,7 @@ export default function App() {
   // wide — the genre she hand-built in Mailmeteor, now with tracking and an
   // optional per-recipient opening line Mailmeteor can't do.
   const [campMode, setCampMode] = useState("match");
+  const [showcaseUrls, setShowcaseUrls] = useState("");
   const [showcase, setShowcase] = useState({
     theme: "",
     eventLine: "",
@@ -2486,6 +2487,95 @@ BODY:
   // cheap batched pass writes a single personalised opening line per
   // recipient. Everything downstream — review, CC, Gmail push, send,
   // tracking — is the existing pipeline, which is the point.
+  // Bulk-fill the showcase lineup from deployed one-pager URLs: paste one
+  // link per line (e.g. the 8 company pages on the RSVP site), each page is
+  // fetched server-side and reduced to name + one-liner. Failures don't kill
+  // the run — they're reported and the rest fill in.
+  const importLineupFromUrls = async () => {
+    const urls = [
+      ...new Set(
+        showcaseUrls
+          .split(/\s+/)
+          .map((u) => u.trim())
+          .filter((u) => /^https?:\/\//i.test(u))
+      ),
+    ];
+    if (!urls.length) {
+      setErr("http(s)로 시작하는 링크를 한 줄에 하나씩 붙여넣어 주세요.");
+      return;
+    }
+    setBusy("showcaseImport");
+    setErr("");
+    setProgress(0);
+    const results = [];
+    const fails = [];
+    try {
+      const CONC = 3;
+      let done = 0;
+      for (let w = 0; w < urls.length; w += CONC) {
+        await Promise.all(
+          urls.slice(w, w + CONC).map(async (u) => {
+            try {
+              const res = await fetch("/api/fetch-page", {
+                method: "POST",
+                headers: { "content-type": "application/json" },
+                body: JSON.stringify({ url: u }),
+              });
+              const j0 = await res.json();
+              if (!res.ok) throw new Error(j0.error || `HTTP ${res.status}`);
+              const out = await claude(
+                `Below is text extracted from a startup one-pager web page (${u}).
+Return ONLY JSON, no markdown: {"name":"official startup name","oneLiner":"${
+                  lang === "KO"
+                    ? "한국어 한 줄 소개, 15단어 이내, 사실만"
+                    : "English one-line description, max 15 words, factual"
+                }"}
+
+---
+${j0.text.slice(0, 20000)}`,
+                400
+              );
+              const j = parseJSON(out);
+              if (!j.name) throw new Error("이름 추출 실패");
+              results.push({
+                name: String(j.name).trim(),
+                oneLiner: String(j.oneLiner || "").trim(),
+                link: u,
+              });
+            } catch (e2) {
+              fails.push(`${u.replace(/^https?:\/\//, "").slice(0, 40)} — ${e2.message}`);
+            } finally {
+              done += 1;
+              setProgress(Math.round((done / urls.length) * 100));
+            }
+          })
+        );
+      }
+      if (results.length) {
+        setShowcase((prev) => {
+          const kept = prev.list.filter(
+            (r) => r.name.trim() || r.oneLiner.trim() || r.link.trim()
+          );
+          const seen = new Set(kept.map((r) => r.link.trim()).filter(Boolean));
+          return {
+            ...prev,
+            list: [...kept, ...results.filter((r) => !seen.has(r.link))],
+          };
+        });
+        setShowcaseUrls("");
+      }
+      if (fails.length)
+        setErr(
+          `라인업 읽기: ${results.length}개 성공 · ${fails.length}개 실패 (${fails[0]}${
+            fails.length > 1 ? " 외" : ""
+          }) — 실패한 곳은 직접 입력해주세요.`
+        );
+    } finally {
+      setBusy("");
+      setProgress(0);
+    }
+  };
+
   const runShowcase = async () => {
     const sc = showcase;
     if (!sc.theme.trim()) {
@@ -4650,6 +4740,38 @@ Return ONLY a JSON array: [{"i":0,"line":"..."}]`,
                       }}
                     >
                       프로필에서 가져오기
+                    </Btn>
+                  </div>
+
+                  <div
+                    style={{
+                      border: `1px dashed ${C.line}`,
+                      borderRadius: 8,
+                      padding: "10px 12px",
+                      marginBottom: 14,
+                      background: "#FAFBFC",
+                    }}
+                  >
+                    <div style={{ fontSize: 11.5, fontWeight: 600, color: C.mute, marginBottom: 6 }}>
+                      원페이저 링크 일괄 읽어오기 — 배포된 페이지 주소를 한 줄에 하나씩
+                    </div>
+                    <textarea
+                      value={showcaseUrls}
+                      onChange={(e) => setShowcaseUrls(e.target.value)}
+                      placeholder={"https://kimst-rsvp-2026.vercel.app/companies/…\nhttps://…"}
+                      rows={3}
+                      disabled={!!busy}
+                      style={{ ...inputStyle(true), resize: "vertical", marginBottom: 8 }}
+                    />
+                    <Btn
+                      small
+                      kind="ghost"
+                      onClick={importLineupFromUrls}
+                      disabled={!!busy || !showcaseUrls.trim()}
+                    >
+                      {busy === "showcaseImport"
+                        ? `읽는 중… ${progress}%`
+                        : "링크에서 이름·한 줄 소개 자동 추출"}
                     </Btn>
                   </div>
 
