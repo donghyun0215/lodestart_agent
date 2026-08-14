@@ -4,3 +4,8 @@ node_modules
 .env
 .DS_Store
 *.log
+
+# personal data never goes in the repo
+contacts_master.csv
+*명함첩*.csv
+db_import_*.csv
