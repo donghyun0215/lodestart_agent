@@ -1247,6 +1247,11 @@ export default function App() {
   // renders crawl).
   const [contactsShown, setContactsShown] = useState(150);
   const [hoveredContact, setHoveredContact] = useState(null);
+  // Change log (contact_logs table): who touched the DB, when, what — and
+  // enough snapshot data to reverse the most recent action.
+  const [logs, setLogs] = useState([]);
+  const [logsShown, setLogsShown] = useState(15);
+  const [logsError, setLogsError] = useState("");
   const hoverTimer = React.useRef(null);
   // Mirrors Radix's openDelay: the card only arms after the pointer rests on
   // a row, so sweeping down the list doesn't flash a card per row.
@@ -1595,10 +1600,21 @@ export default function App() {
         notes: newContact.notes.trim(),
         sendable: "YES",
       };
-      const { error } = await supabase.from("contacts").upsert([row], { onConflict: "email" });
+      const { data: ins, error } = await supabase
+        .from("contacts")
+        .upsert([row], { onConflict: "email" })
+        .select()
+        .single();
       if (error) throw error;
       setDbNote("컨택 1건을 추가했습니다.");
       setNewContact(NEW_CONTACT_BLANK);
+      logAction("add", {
+        contact_email: row.email,
+        contact_org: row.org,
+        before: null,
+        after: ins || row,
+        note: "수동 추가",
+      });
       await loadContacts();
     } catch (e) {
       setDbNote("추가 실패: " + e.message);
@@ -1628,8 +1644,14 @@ export default function App() {
       if (!res.ok) throw new Error(j.error || `HTTP ${res.status}`);
       setContacts((prev) => prev.filter((x) => x.id !== c.id));
       setEditingId(null);
-      setEditRow(null);
       setDbNote(`"${c.org || c.email}" 컨택을 삭제했습니다.`);
+      logAction("delete", {
+        contact_email: c.email,
+        contact_org: c.org,
+        before: c, // full row incl. id — undo re-inserts it as-was
+        after: null,
+        note: "DB에서 삭제",
+      });
     } catch (e) {
       setDbNote("삭제 실패: " + e.message);
     } finally {
@@ -1637,10 +1659,131 @@ export default function App() {
     }
   };
 
+  // Reverse the MOST RECENT logged action — and only that one. Anything
+  // deeper would need a full event-sourcing model; one step of "앗 실수"
+  // coverage is what was asked for and what the snapshots support safely.
+  const undoLast = async (entry) => {
+    if (!entry || logs[0]?.id !== entry.id || entry.action === "undo") return;
+    const label =
+      entry.action === "import"
+        ? `${entry.note} 전체를 되돌립니다`
+        : `"${entry.contact_org || entry.contact_email}"에 대한 ${
+            { update: "수정", add: "추가", delete: "삭제" }[entry.action] || entry.action
+          }을(를) 되돌립니다`;
+    if (!window.confirm(`마지막 작업을 되돌립니다.\n${label}.\n계속할까요?`)) return;
+    setBusy("undo");
+    try {
+      const stripMeta = ({ id, created_at, updated_at, ...rest }) => rest;
+      if (entry.action === "update") {
+        const b = entry.before;
+        const { error } = await supabase
+          .from("contacts")
+          .update({ ...stripMeta(b), updated_at: new Date().toISOString() })
+          .eq("id", b.id);
+        if (error) throw error;
+      } else if (entry.action === "add") {
+        const a = entry.after;
+        const res = await fetch("/api/contacts/delete", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ id: a.id }),
+        });
+        const j = await res.json().catch(() => ({}));
+        if (!res.ok) throw new Error(j.error || `HTTP ${res.status}`);
+      } else if (entry.action === "delete") {
+        const { error } = await supabase.from("contacts").insert(entry.before);
+        if (error) throw error;
+      } else if (entry.action === "import") {
+        const updated = entry.before?.updated || [];
+        const inserted = entry.after?.inserted || [];
+        if (inserted.length && !account.canDelete)
+          throw new Error(
+            "이 업로드는 신규 추가분 삭제가 필요해 삭제 권한 계정(Tammy/동현)만 되돌릴 수 있습니다."
+          );
+        // restore the previous state of updated rows
+        const CHUNK = 300;
+        for (let i = 0; i < updated.length; i += CHUNK) {
+          const { error } = await supabase
+            .from("contacts")
+            .upsert(updated.slice(i, i + CHUNK), { onConflict: "email" });
+          if (error) throw error;
+        }
+        // remove the rows the upload created (route-enforced, in small waves)
+        const byEmail = new Map(contacts.map((c) => [c.email, c.id]));
+        const ids = inserted.map((e) => byEmail.get(e)).filter(Boolean);
+        for (let i = 0; i < ids.length; i += 5) {
+          await Promise.all(
+            ids.slice(i, i + 5).map((id) =>
+              fetch("/api/contacts/delete", {
+                method: "POST",
+                headers: { "content-type": "application/json" },
+                body: JSON.stringify({ id }),
+              }).then(async (r) => {
+                if (!r.ok) {
+                  const j = await r.json().catch(() => ({}));
+                  throw new Error(j.error || `HTTP ${r.status}`);
+                }
+              })
+            )
+          );
+        }
+      }
+      await logAction("undo", {
+        contact_email: entry.contact_email,
+        contact_org: entry.contact_org,
+        before: null,
+        after: null,
+        note: `되돌림: ${entry.note || entry.action} (로그 #${entry.id})`,
+      });
+      setDbNote("마지막 작업을 되돌렸습니다.");
+      await loadContacts();
+    } catch (e) {
+      setDbNote("되돌리기 실패: " + e.message);
+    } finally {
+      setBusy("");
+    }
+  };
+
+  const loadLogs = async () => {
+    const { data, error } = await supabase
+      .from("contact_logs")
+      .select("*")
+      .order("id", { ascending: false })
+      .limit(300);
+    if (error) {
+      // Most likely the migration hasn't been run yet — say so instead of
+      // failing silently.
+      setLogsError(
+        error.message.includes("contact_logs")
+          ? "로그 테이블이 없습니다 — Supabase에서 migration_contact_logs.sql을 실행해주세요."
+          : "로그 불러오기 실패: " + error.message
+      );
+      return;
+    }
+    setLogsError("");
+    setLogs(data || []);
+  };
+
+  // One row per DB mutation. Logging must never break the mutation itself,
+  // so failures here are swallowed after a console note.
+  const logAction = async (action, fields) => {
+    try {
+      const { data, error } = await supabase
+        .from("contact_logs")
+        .insert({ actor: account.email || "(로그인 안 됨)", action, ...fields })
+        .select()
+        .single();
+      if (!error && data) setLogs((prev) => [data, ...prev]);
+    } catch (e) {
+      console.warn("log write failed", e);
+    }
+  };
+
   const saveContact = async (id, row) => {
     if (!id || !row) return;
     setBusy("contact");
     try {
+      const beforeRow = contacts.find((c) => c.id === id) || null;
       const patch = { ...row, updated_at: new Date().toISOString() };
       const { error } = await supabase
         .from("contacts")
@@ -1652,6 +1795,18 @@ export default function App() {
       );
       setDbNote("컨택 정보를 수정했습니다.");
       setEditingId(null);
+      if (beforeRow) {
+        const changed = Object.keys(row).filter(
+          (k) => (beforeRow[k] || "") !== (row[k] || "")
+        );
+        logAction("update", {
+          contact_email: beforeRow.email,
+          contact_org: row.org || beforeRow.org,
+          before: beforeRow,
+          after: { ...beforeRow, ...row },
+          note: changed.length ? `${changed.join(", ")} 변경` : "변경 없음",
+        });
+      }
     } catch (e) {
       setDbNote("수정 실패: " + e.message);
     } finally {
@@ -1839,9 +1994,10 @@ Return ONLY a JSON array, no prose, no markdown:
     }
   };
 
-  // Load contacts from the DB once on mount.
+  // Load contacts + change log from the DB once on mount.
   useEffect(() => {
     loadContacts();
+    loadLogs();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -1888,6 +2044,17 @@ Return ONLY a JSON array, no prose, no markdown:
         }
         setBusy("uploadContacts");
         try {
+          // Snapshot what this upload will touch BEFORE it happens, so the
+          // whole import can be reversed as one action: rows whose email
+          // already exists get their current state saved; the rest are new.
+          const existingByEmail = new Map(contacts.map((c) => [c.email, c]));
+          const updatedBefore = rows
+            .map((r) => existingByEmail.get(r.email))
+            .filter(Boolean);
+          const insertedEmails = rows
+            .filter((r) => !existingByEmail.has(r.email))
+            .map((r) => r.email);
+
           const CHUNK = 500;
           for (let i = 0; i < rows.length; i += CHUNK) {
             const chunk = rows.slice(i, i + CHUNK);
@@ -1897,6 +2064,13 @@ Return ONLY a JSON array, no prose, no markdown:
             if (error) throw error;
           }
           setDbNote(`${rows.length}건을 DB에 추가/업데이트했습니다.`);
+          logAction("import", {
+            contact_email: null,
+            contact_org: null,
+            before: { updated: updatedBefore },
+            after: { inserted: insertedEmails },
+            note: `CSV 업로드 — 신규 ${insertedEmails.length}건 · 갱신 ${updatedBefore.length}건`,
+          });
           await loadContacts();
         } catch (e2) {
           setDbNote("DB 업로드 실패: " + e2.message);
@@ -4178,6 +4352,112 @@ Return ONLY a JSON array: [{"i":0,"line":"..."}]`,
 
                   <Btn onClick={addContact} disabled={!!busy || !newContact.email}>
                     {busy === "addContact" ? "추가 중…" : "추가"}
+                  </Btn>
+                </div>
+              )}
+            </Card>
+
+            {/* ---------------- change log ---------------- */}
+            <Card style={{ marginTop: 16 }} pad={0}>
+              <div style={{ padding: "16px 16px 10px" }}>
+                <H sub="DB가 바뀔 때마다 기록됩니다 — 누가, 언제, 무엇을. 맨 위(가장 최근) 작업만 되돌릴 수 있습니다.">
+                  변경 로그
+                </H>
+              </div>
+              {logsError && (
+                <div style={{ padding: "0 16px 14px", fontSize: 12, color: C.alert }}>
+                  {logsError}
+                </div>
+              )}
+              {!logsError && !logs.length && (
+                <div style={{ padding: "0 16px 16px", fontSize: 12, color: C.mute }}>
+                  아직 기록이 없습니다. 수정·추가·삭제·CSV 업로드가 일어나면 여기에
+                  쌓입니다.
+                </div>
+              )}
+              {logs.slice(0, logsShown).map((l, i) => {
+                const d = new Date(l.created_at);
+                const today = new Date();
+                const sameDay = d.toDateString() === today.toDateString();
+                const two = (n) => String(n).padStart(2, "0");
+                const time = `${two(d.getHours())}:${two(d.getMinutes())}:${two(d.getSeconds())}`;
+                const when = sameDay
+                  ? time
+                  : `${d.getMonth() + 1}/${d.getDate()} ${time}`;
+                const A = {
+                  update: ["수정", "#1D4ED8", "#DBEAFE"],
+                  add: ["추가", "#166534", "#DCFCE7"],
+                  delete: ["삭제", "#991B1B", "#FEE2E2"],
+                  import: ["CSV 업로드", "#7A611F", "#FEF3C7"],
+                  undo: ["되돌림", "#4B5563", "#E5E7EB"],
+                }[l.action] || [l.action, C.mute, "#EEF2F5"];
+                return (
+                  <div
+                    key={l.id}
+                    style={{
+                      display: "flex",
+                      alignItems: "center",
+                      gap: 10,
+                      padding: "9px 16px",
+                      borderTop: `1px solid ${C.line}`,
+                      fontSize: 12.5,
+                      background: i === 0 ? "#FBFCFD" : "transparent",
+                    }}
+                  >
+                    <span
+                      style={{
+                        fontFamily: "'JetBrains Mono', monospace",
+                        fontSize: 11,
+                        color: C.mute,
+                        flexShrink: 0,
+                        width: sameDay ? 62 : 96,
+                      }}
+                      title={d.toLocaleString()}
+                    >
+                      {when}
+                    </span>
+                    <span
+                      style={{
+                        flexShrink: 0,
+                        fontSize: 10.5,
+                        fontWeight: 700,
+                        color: A[1],
+                        background: A[2],
+                        borderRadius: 999,
+                        padding: "2px 8px",
+                      }}
+                    >
+                      {A[0]}
+                    </span>
+                    <span style={{ minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", color: C.ink }}>
+                      {l.contact_org || l.contact_email || ""}
+                      {(l.contact_org || l.contact_email) && l.note ? " — " : ""}
+                      <span style={{ color: C.mute }}>{l.note}</span>
+                    </span>
+                    <span
+                      style={{
+                        marginLeft: "auto",
+                        flexShrink: 0,
+                        fontSize: 11,
+                        color: C.mute,
+                        fontFamily: "'JetBrains Mono', monospace",
+                      }}
+                      title={l.actor}
+                    >
+                      {(l.actor || "").split("@")[0]}
+                    </span>
+                    {i === 0 && l.action !== "undo" && (
+                      <Btn small kind="ghost" onClick={() => undoLast(l)} disabled={!!busy}>
+                        ↺ 되돌리기
+                      </Btn>
+                    )}
+                  </div>
+                );
+              })}
+              {logs.length > logsShown && (
+                <div style={{ padding: "10px 16px", textAlign: "center", borderTop: `1px solid ${C.line}` }}>
+                  <Btn small kind="quiet" onClick={() => setLogsShown((n) => n + 30)}>
+                    더 보기 — {Math.min(logsShown, logs.length)} / {logs.length}건
                   </Btn>
                 </div>
               )}
