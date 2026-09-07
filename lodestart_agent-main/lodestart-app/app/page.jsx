@@ -636,6 +636,294 @@ const ContactEditPanel = React.memo(function ContactEditPanel({
   );
 });
 
+// --- change-log detail modal ----------------------------------------------
+// Click a log row -> exactly what changed. Content adapts to the action:
+// updates show a column-by-column 이전/이후 table, add/delete show the full
+// row, CSV imports list new rows and per-row diffs of updated ones.
+const LOG_FIELDS = [
+  ["email", "이메일"],
+  ["org", "회사"],
+  ["person", "담당자"],
+  ["title", "직함"],
+  ["country", "국가"],
+  ["type", "유형"],
+  ["notes", "회사 설명"],
+  ["sendable", "발송 가능"],
+];
+
+function diffFields(before, after) {
+  return LOG_FIELDS.filter(
+    ([k]) => ((before?.[k] ?? "") + "") !== ((after?.[k] ?? "") + "")
+  ).map(([k, label]) => ({
+    key: k,
+    label,
+    from: (before?.[k] ?? "") + "",
+    to: (after?.[k] ?? "") + "",
+  }));
+}
+
+function fmtVal(key, v) {
+  if (v === "" || v == null) return "(비어 있음)";
+  return key === "type" ? typeLabel(v) : String(v);
+}
+
+function DiffTable({ before, after }) {
+  const d = diffFields(before, after);
+  if (!d.length)
+    return <div style={{ fontSize: 12, color: C.mute }}>값 변경 없음 (동일한 내용으로 저장됨)</div>;
+  return (
+    <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12.5 }}>
+      <thead>
+        <tr>
+          {["항목", "이전", "이후"].map((h) => (
+            <th
+              key={h}
+              style={{
+                textAlign: "left",
+                padding: "6px 8px",
+                borderBottom: `1px solid ${C.line}`,
+                color: C.mute,
+                fontSize: 11,
+                fontWeight: 600,
+              }}
+            >
+              {h}
+            </th>
+          ))}
+        </tr>
+      </thead>
+      <tbody>
+        {d.map((r) => (
+          <tr key={r.key}>
+            <td style={{ padding: "7px 8px", borderBottom: `1px solid #F0F3F6`, fontWeight: 600, whiteSpace: "nowrap", verticalAlign: "top" }}>
+              {r.label}
+            </td>
+            <td style={{ padding: "7px 8px", borderBottom: `1px solid #F0F3F6`, color: "#991B1B", background: "#FEF6F6", verticalAlign: "top", wordBreak: "break-word" }}>
+              {fmtVal(r.key, r.from)}
+            </td>
+            <td style={{ padding: "7px 8px", borderBottom: `1px solid #F0F3F6`, color: "#166534", background: "#F4FBF6", verticalAlign: "top", wordBreak: "break-word" }}>
+              {fmtVal(r.key, r.to)}
+            </td>
+          </tr>
+        ))}
+      </tbody>
+    </table>
+  );
+}
+
+function RowTable({ row }) {
+  return (
+    <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12.5 }}>
+      <tbody>
+        {LOG_FIELDS.filter(([k]) => (row?.[k] ?? "") !== "").map(([k, label]) => (
+          <tr key={k}>
+            <td style={{ padding: "6px 8px", borderBottom: `1px solid #F0F3F6`, fontWeight: 600, whiteSpace: "nowrap", color: C.mute, width: 90, verticalAlign: "top" }}>
+              {label}
+            </td>
+            <td style={{ padding: "6px 8px", borderBottom: `1px solid #F0F3F6`, wordBreak: "break-word" }}>
+              {fmtVal(k, row[k])}
+            </td>
+          </tr>
+        ))}
+      </tbody>
+    </table>
+  );
+}
+
+function LogDetailModal({ entry, onClose }) {
+  React.useEffect(() => {
+    const h = (e) => e.key === "Escape" && onClose();
+    window.addEventListener("keydown", h);
+    return () => window.removeEventListener("keydown", h);
+  }, [onClose]);
+  if (!entry) return null;
+  const d = new Date(entry.created_at);
+  const A = {
+    update: "수정",
+    add: "추가",
+    delete: "삭제",
+    import: "CSV 업로드",
+    undo: "되돌림",
+  }[entry.action] || entry.action;
+
+  let body = null;
+  if (entry.action === "update") {
+    body = <DiffTable before={entry.before} after={entry.after} />;
+  } else if (entry.action === "add") {
+    body = (
+      <>
+        <div style={{ fontSize: 12, color: C.mute, marginBottom: 8 }}>추가된 컨택:</div>
+        <RowTable row={entry.after} />
+      </>
+    );
+  } else if (entry.action === "delete") {
+    body = (
+      <>
+        <div style={{ fontSize: 12, color: C.mute, marginBottom: 8 }}>삭제된 컨택 (삭제 직전 상태):</div>
+        <RowTable row={entry.before} />
+      </>
+    );
+  } else if (entry.action === "import") {
+    const insertedRows = entry.after?.insertedRows;
+    const insertedEmails = entry.after?.inserted || [];
+    const updatedOld = entry.before?.updated || [];
+    const updatedNew = entry.after?.updatedNew || null;
+    const newByEmail = updatedNew
+      ? new Map(updatedNew.map((r) => [r.email, r]))
+      : null;
+    const updatedDiffs = updatedOld
+      .map((oldRow) => {
+        const newRow = newByEmail?.get(oldRow.email);
+        return {
+          email: oldRow.email,
+          org: (newRow?.org || oldRow.org || oldRow.email) + "",
+          diffs: newRow ? diffFields(oldRow, newRow) : null,
+        };
+      })
+      // real changes first, no-op upserts at the end
+      .sort((a, b) => (b.diffs?.length || 0) - (a.diffs?.length || 0));
+    body = (
+      <>
+        <div style={{ fontSize: 12.5, fontWeight: 700, margin: "2px 0 8px" }}>
+          신규 추가 {insertedEmails.length}건
+        </div>
+        {insertedEmails.length === 0 ? (
+          <div style={{ fontSize: 12, color: C.mute, marginBottom: 12 }}>없음</div>
+        ) : (
+          <div style={{ maxHeight: 180, overflowY: "auto", border: `1px solid ${C.line}`, borderRadius: 8, padding: "4px 0", marginBottom: 14 }}>
+            {(insertedRows || insertedEmails.map((e) => ({ email: e }))).map((r, i) => (
+              <div key={i} style={{ padding: "5px 12px", fontSize: 12.5, borderBottom: i < insertedEmails.length - 1 ? "1px solid #F0F3F6" : "none" }}>
+                <span style={{ fontWeight: 600 }}>{r.org || "(회사명 없음)"}</span>
+                <span style={{ color: C.mute, fontFamily: "'JetBrains Mono', monospace", fontSize: 11, marginLeft: 8 }}>
+                  {r.email}
+                </span>
+                {r.type && (
+                  <span style={{ color: C.mute, fontSize: 11, marginLeft: 8 }}>· {typeLabel(r.type)}</span>
+                )}
+              </div>
+            ))}
+          </div>
+        )}
+        <div style={{ fontSize: 12.5, fontWeight: 700, margin: "2px 0 8px" }}>
+          기존 컨택 갱신 {updatedOld.length}건
+        </div>
+        {updatedOld.length === 0 ? (
+          <div style={{ fontSize: 12, color: C.mute }}>없음</div>
+        ) : !updatedNew ? (
+          <div style={{ fontSize: 12, color: C.mute }}>
+            이 업로드는 상세 비교 기능 추가 이전에 기록되어 컬럼별 변경 내역이
+            없습니다. (이후 업로드부터는 표시됩니다)
+          </div>
+        ) : (
+          <div style={{ maxHeight: 300, overflowY: "auto", border: `1px solid ${C.line}`, borderRadius: 8, marginBottom: 4 }}>
+            {updatedDiffs.map((u, i) => (
+              <div key={u.email} style={{ padding: "8px 12px", borderBottom: i < updatedDiffs.length - 1 ? `1px solid ${C.line}` : "none" }}>
+                <div style={{ fontSize: 12.5, marginBottom: u.diffs?.length ? 6 : 0 }}>
+                  <span style={{ fontWeight: 600 }}>{u.org}</span>
+                  <span style={{ color: C.mute, fontFamily: "'JetBrains Mono', monospace", fontSize: 11, marginLeft: 8 }}>
+                    {u.email}
+                  </span>
+                </div>
+                {u.diffs?.length ? (
+                  <div style={{ display: "flex", flexDirection: "column", gap: 3 }}>
+                    {u.diffs.map((df) => (
+                      <div key={df.key} style={{ fontSize: 12 }}>
+                        <span style={{ color: C.mute, fontWeight: 600 }}>{df.label}: </span>
+                        <span style={{ color: "#991B1B", textDecoration: "line-through" }}>
+                          {fmtVal(df.key, df.from)}
+                        </span>
+                        <span style={{ color: C.mute }}> → </span>
+                        <span style={{ color: "#166534", fontWeight: 600 }}>{fmtVal(df.key, df.to)}</span>
+                      </div>
+                    ))}
+                  </div>
+                ) : (
+                  <div style={{ fontSize: 11.5, color: C.mute }}>변경 없음 (동일 값 재업로드)</div>
+                )}
+              </div>
+            ))}
+          </div>
+        )}
+      </>
+    );
+  } else {
+    body = <div style={{ fontSize: 12.5, color: C.ink }}>{entry.note}</div>;
+  }
+
+  return (
+    <div
+      onClick={onClose}
+      style={{
+        position: "fixed",
+        inset: 0,
+        background: "rgba(12,26,42,0.45)",
+        backdropFilter: "blur(2px)",
+        zIndex: 100,
+        display: "flex",
+        alignItems: "center",
+        justifyContent: "center",
+        padding: 20,
+      }}
+    >
+      <div
+        onClick={(e) => e.stopPropagation()}
+        style={{
+          background: C.surface,
+          borderRadius: 14,
+          boxShadow: "0 8px 20px rgba(12,26,42,0.18), 0 24px 60px rgba(12,26,42,0.22)",
+          width: "min(640px, 94vw)",
+          maxHeight: "84vh",
+          display: "flex",
+          flexDirection: "column",
+          animation: "hoverCardIn .18s ease both",
+        }}
+      >
+        <div
+          style={{
+            display: "flex",
+            alignItems: "center",
+            gap: 10,
+            padding: "14px 18px",
+            borderBottom: `1px solid ${C.line}`,
+          }}
+        >
+          <div style={{ fontFamily: "'Schibsted Grotesk', sans-serif", fontWeight: 700, fontSize: 14.5 }}>
+            {A} 상세
+          </div>
+          <div style={{ fontSize: 11.5, color: C.mute }}>
+            {d.toLocaleString("ko-KR")} · {entry.actor}
+          </div>
+          <button
+            onClick={onClose}
+            style={{
+              marginLeft: "auto",
+              width: 28,
+              height: 28,
+              border: `1px solid ${C.line}`,
+              borderRadius: 6,
+              background: C.surface,
+              cursor: "pointer",
+              color: C.mute,
+              fontSize: 14,
+            }}
+          >
+            ✕
+          </button>
+        </div>
+        <div style={{ padding: "14px 18px", overflowY: "auto" }}>
+          {(entry.contact_org || entry.contact_email) && (
+            <div style={{ fontSize: 12, color: C.mute, marginBottom: 10 }}>
+              대상: <b style={{ color: C.ink }}>{entry.contact_org || entry.contact_email}</b>
+              {entry.contact_org && entry.contact_email ? ` (${entry.contact_email})` : ""}
+            </div>
+          )}
+          {body}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function maskEmail(email, staff = false) {
   if (!email) return "";
   // Staff (lodestart.ai Gmail login, verified server-side by /api/auth/status)
@@ -1252,6 +1540,7 @@ export default function App() {
   const [logs, setLogs] = useState([]);
   const [logsShown, setLogsShown] = useState(15);
   const [logsError, setLogsError] = useState("");
+  const [selectedLog, setSelectedLog] = useState(null);
   const hoverTimer = React.useRef(null);
   // Mirrors Radix's openDelay: the card only arms after the pointer rests on
   // a row, so sweeping down the list doesn't flash a card per row.
@@ -2064,11 +2353,16 @@ Return ONLY a JSON array, no prose, no markdown:
             if (error) throw error;
           }
           setDbNote(`${rows.length}건을 DB에 추가/업데이트했습니다.`);
+          const updatedEmailSet = new Set(updatedBefore.map((r) => r.email));
           logAction("import", {
             contact_email: null,
             contact_org: null,
             before: { updated: updatedBefore },
-            after: { inserted: insertedEmails },
+            after: {
+              inserted: insertedEmails, // kept as emails — undo depends on it
+              insertedRows: rows.filter((r) => !updatedEmailSet.has(r.email)),
+              updatedNew: rows.filter((r) => updatedEmailSet.has(r.email)),
+            },
             note: `CSV 업로드 — 신규 ${insertedEmails.length}건 · 갱신 ${updatedBefore.length}건`,
           });
           await loadContacts();
@@ -4394,6 +4688,8 @@ Return ONLY a JSON array: [{"i":0,"line":"..."}]`,
                 return (
                   <div
                     key={l.id}
+                    onClick={() => setSelectedLog(l)}
+                    title="클릭하면 상세 변경 내역을 봅니다"
                     style={{
                       display: "flex",
                       alignItems: "center",
@@ -4402,7 +4698,13 @@ Return ONLY a JSON array: [{"i":0,"line":"..."}]`,
                       borderTop: `1px solid ${C.line}`,
                       fontSize: 12.5,
                       background: i === 0 ? "#FBFCFD" : "transparent",
+                      cursor: "pointer",
+                      transition: "background .12s",
                     }}
+                    onMouseEnter={(e) => (e.currentTarget.style.background = "#F2F6F9")}
+                    onMouseLeave={(e) =>
+                      (e.currentTarget.style.background = i === 0 ? "#FBFCFD" : "transparent")
+                    }
                   >
                     <span
                       style={{
@@ -4447,9 +4749,11 @@ Return ONLY a JSON array: [{"i":0,"line":"..."}]`,
                       {(l.actor || "").split("@")[0]}
                     </span>
                     {i === 0 && l.action !== "undo" && (
-                      <Btn small kind="ghost" onClick={() => undoLast(l)} disabled={!!busy}>
-                        ↺ 되돌리기
-                      </Btn>
+                      <div onClick={(e) => e.stopPropagation()}>
+                        <Btn small kind="ghost" onClick={() => undoLast(l)} disabled={!!busy}>
+                          ↺ 되돌리기
+                        </Btn>
+                      </div>
                     )}
                   </div>
                 );
@@ -6175,6 +6479,9 @@ Return ONLY a JSON array: [{"i":0,"line":"..."}]`,
           </div>
         )}
       </div>
+      {selectedLog && (
+        <LogDetailModal entry={selectedLog} onClose={() => setSelectedLog(null)} />
+      )}
     </div>
   );
 }
