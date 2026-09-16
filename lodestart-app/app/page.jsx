@@ -2270,7 +2270,7 @@ Return ONLY a JSON array, no prose, no markdown:
             notes: (r.notes || "").trim(),
             sendable: (r.sendable || "YES").trim(),
           }))
-          .filter((c) => c.email && c.sendable === "YES")
+          .filter((c) => c.email)
       );
     } catch (e) {
       setDbNote(
@@ -2515,14 +2515,23 @@ Return ONLY a JSON array, no prose, no markdown:
   // them.
   const pool = useMemo(() => {
     const active = new Set([...baseTypesFor(audience), ...extraTypes]);
-    return contacts.filter((c) => active.has(c.type) && (c.org || "").trim());
+    return contacts.filter(
+      (c) =>
+        active.has(c.type) &&
+        (c.org || "").trim() &&
+        // sendable=NO is how a contact stays in the book without ever being
+        // emailed — LinkedIn-only investors, opt-outs, placeholder rows.
+        c.sendable === "YES"
+    );
   }, [contacts, audience, extraTypes]);
 
   // Shown in the campaign UI so the exclusion is visible, not silent.
   const orglessCount = useMemo(() => {
     const active = new Set([...baseTypesFor(audience), ...extraTypes]);
-    return contacts.filter((c) => active.has(c.type) && !(c.org || "").trim())
-      .length;
+    return contacts.filter(
+      (c) =>
+        active.has(c.type) && (!(c.org || "").trim() || c.sendable !== "YES")
+    ).length;
   }, [contacts, audience, extraTypes]);
 
   const scored = useMemo(
@@ -4457,19 +4466,39 @@ Return ONLY a JSON array: [{"i":0,"line":"..."}]`,
                           whiteSpace: "nowrap",
                         }}
                       >
-                        {maskEmail(c.email, account.staff)}
+                        {c.sendable === "YES" ? (
+                          maskEmail(c.email, account.staff)
+                        ) : (
+                          <span style={{ color: "#7A611F" }}>
+                            발송 불가
+                            {/no-email\.invalid$/i.test(c.email || "") ? " · 이메일 없음" : ""}
+                          </span>
+                        )}
                       </div>
                       <div style={{ width: 70, flexShrink: 0, color: C.mute, fontSize: 11 }}>
                         {c.country}
                       </div>
                       <button
-                        onClick={() =>
+                        onClick={() => {
+                          // LinkedIn-only rows carry the profile URL in notes.
+                          const li = (c.notes || "").match(
+                            /https?:\/\/[^\s|]*linkedin\.com\/in\/[^\s|]*/i
+                          );
+                          if (c.sendable !== "YES" && li) {
+                            window.open(li[0], "_blank");
+                            return;
+                          }
                           window.open(
                             `https://mail.google.com/mail/?view=cm&fs=1&to=${encodeURIComponent(c.email)}`,
                             "_blank"
-                          )
+                          );
+                        }}
+                        title={
+                          c.sendable !== "YES" &&
+                          /linkedin\.com\/in\//i.test(c.notes || "")
+                            ? "링크드인 프로필 열기"
+                            : "매칭·초안 없이 이 주소로 바로 메일을 씁니다 (Gmail 새 창)"
                         }
-                        title="매칭·초안 없이 이 주소로 바로 메일을 씁니다 (Gmail 새 창)"
                         style={{
                           flexShrink: 0,
                           border: `1px solid ${C.line}`,
@@ -4481,7 +4510,10 @@ Return ONLY a JSON array: [{"i":0,"line":"..."}]`,
                           cursor: "pointer",
                         }}
                       >
-                        메일 쓰기
+                        {c.sendable !== "YES" &&
+                        /linkedin\.com\/in\//i.test(c.notes || "")
+                          ? "링크드인"
+                          : "메일 쓰기"}
                       </button>
                       <button
                         onClick={() =>
@@ -5406,8 +5438,9 @@ Return ONLY a JSON array: [{"i":0,"line":"..."}]`,
               )}
               {orglessCount > 0 && (
                 <div style={{ fontSize: 11, color: C.mute, marginTop: 8, lineHeight: 1.6 }}>
-                  회사명이 없는 {orglessCount.toLocaleString()}건은 발송 대상에서
-                  제외되어 있습니다. 컨택 탭에서 회사명을 채우면 다시 포함됩니다.
+                  회사명이 없거나 발송 불가로 표시된 {orglessCount.toLocaleString()}건은
+                  발송 대상에서 제외되어 있습니다. 컨택 탭에서 회사명을 채우거나 발송
+                  가능을 YES로 바꾸면 포함됩니다.
                 </div>
               )}
               {!pool.length && (
