@@ -140,6 +140,7 @@ const TYPE_OPTIONS = [
   "GOV_AND_AGENCY",
   "RESEARCH",
   "STARTUP",
+  "LINKEDIN_ONLY",
   "OTHERS",
   "UNCLASSIFIED",
   "TEST",
@@ -2479,19 +2480,30 @@ Return ONLY a JSON array, no prose, no markdown:
   }, []);
 
   const filteredContacts = useMemo(() => {
-    const q = contactQuery.trim().toLowerCase();
+    // Every word must appear somewhere in the row, so "singapore fintech"
+    // narrows instead of finding nothing. The company description is part of
+    // the haystack, which is what makes topic searches like "sustainability"
+    // or "agtech" work.
+    const terms = contactQuery.trim().toLowerCase().split(/\s+/).filter(Boolean);
     return contacts.filter((c) => {
       if (contactTypeFilter !== "ALL" && c.type !== contactTypeFilter) return false;
-      if (!q) return true;
-      return (
-        c.org.toLowerCase().includes(q) ||
-        c.person.toLowerCase().includes(q) ||
-        c.email.toLowerCase().includes(q) ||
-        // Country added at Tammy's request (2026-08-04) — e.g. "korea" to
-        // pull up every Korean contact, or fixing miscategorised countries.
-        (c.country || "").toLowerCase().includes(q) ||
-        c.notes.toLowerCase().includes(q)
-      );
+      if (!terms.length) return true;
+      const hay = (
+        c.org +
+        " " +
+        c.person +
+        " " +
+        c.email +
+        " " +
+        (c.title || "") +
+        " " +
+        (c.country || "") +
+        " " +
+        (c.type || "") +
+        " " +
+        c.notes
+      ).toLowerCase();
+      return terms.every((t) => hay.includes(t));
     });
   }, [contacts, contactQuery, contactTypeFilter]);
 
@@ -2500,6 +2512,8 @@ Return ONLY a JSON array, no prose, no markdown:
   // layered on top of whichever audience framing (goal/hint/cta) is active,
   // without having to invent a new audience bucket for every combination.
   const baseTypesFor = (aud) => {
+    // LINKEDIN_ONLY never enters a send pool — those contacts have no email
+    // address at all; they exist to be reached on LinkedIn by hand.
     if (aud === "TEST") return ["TEST"];
     if (aud === "VC") return ["INVESTOR"]; // audience key stays "VC"; the contact type is INVESTOR
     if (aud === "CORPORATE_KR") return ["CORPORATE", "STARTUP"]; // PoC·영업 covers corporates and listed startups
@@ -4278,7 +4292,7 @@ Return ONLY a JSON array: [{"i":0,"line":"..."}]`,
                     <input
                       value={contactQuery}
                       onChange={(e) => setContactQuery(e.target.value)}
-                      placeholder="회사, 담당자, 이메일, 국가로 검색"
+                      placeholder="키워드 검색 — 회사·담당자·국가·투자분야 (예: singapore fintech)"
                       style={{
                         width: "100%",
                         boxSizing: "border-box",
