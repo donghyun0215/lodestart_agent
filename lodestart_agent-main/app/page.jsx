@@ -1182,6 +1182,30 @@ function TypeBadge({ type }) {
   );
 }
 
+// Topic synonyms for the contact search. Search is literal, and company
+// descriptions describe the business ("solar inverter manufacturer"), not
+// the theme ("sustainability") — so a theme search missed exactly the
+// companies it should find. A term that belongs to a group matches any word
+// in that group. Toggleable in the UI ("관련어 포함").
+const SEARCH_TOPICS = [["sustainability", "sustainable", "esg", "climate", "carbon emission", "net zero", "net-zero", "decarbon", "renewable", "solar", "wind power", "clean energy", "cleantech", "clean tech", "greentech", "green energy", "environmental", "circular economy", "recycl", "emission", "지속가능", "친환경", "탄소", "기후", "재생에너지", "환경", "carbon neutral", "carbon credit", "low-carbon", "low carbon"], ["energy", "power generation", "battery", "batteries", "hydrogen", "solar", "renewable", "grid", "utility", "utilities", "에너지", "배터리", "수소", "발전"], ["agritech", "agtech", "agri-tech", "agriculture", "agri", "farming", "foodtech", "food tech", "aquaculture", "smart farm", "농업", "스마트팜", "푸드테크"], ["fintech", "financial services", "payment", "payments", "banking", "insurtech", "lending", "wealth", "핀테크", "금융", "결제"], ["ai", "artificial intelligence", "machine learning", "deep learning", "computer vision", "nlp", "llm", "generative", "인공지능"], ["healthcare", "health", "medical", "medtech", "biotech", "pharma", "life science", "digital health", "헬스케어", "바이오", "의료", "제약"], ["logistics", "supply chain", "shipping", "freight", "mobility", "transport", "delivery", "물류", "모빌리티", "운송"], ["maritime", "marine", "shipping", "port", "shipbuilding", "ocean", "offshore", "해양", "조선", "해운", "항만"], ["blockchain", "crypto", "web3", "defi", "digital asset", "token", "블록체인", "가상자산"], ["robotics", "robot", "automation", "drone", "로봇", "자동화", "드론"], ["semiconductor", "chip", "semi", "반도체"], ["proptech", "real estate", "property", "construction", "부동산", "건설"]];
+
+function expandTerm(term) {
+  const t = term.toLowerCase();
+  for (const g of SEARCH_TOPICS) {
+    if (g.some((s) => s === t || (t.length >= 3 && s.startsWith(t)) || (s.length >= 4 && t.startsWith(s))))
+      return g;
+  }
+  return null;
+}
+
+// Short ASCII words ("ai", "esg") need word boundaries or they match inside
+// unrelated words; everything else is a plain substring check.
+function hayHas(hay, s) {
+  if (/^[a-z0-9 -]+$/.test(s) && s.length <= 3)
+    return new RegExp("\\b" + s.replace(/[-]/g, "\\-") + "\\b").test(hay);
+  return hay.includes(s);
+}
+
 async function claudeSearch(prompt, maxTokens = 2000, maxSearches = 4, tries = 0) {
   const res = await fetch("/api/claude", {
     method: "POST",
@@ -1581,6 +1605,7 @@ export default function App() {
   // rows (each row carries a Radix HoverCard, which is what made large
   // renders crawl).
   const [contactsShown, setContactsShown] = useState(150);
+  const [expandSearch, setExpandSearch] = useState(true);
   const [hoveredContact, setHoveredContact] = useState(null);
   // Change log (contact_logs table): who touched the DB, when, what — and
   // enough snapshot data to reverse the most recent action.
@@ -2549,9 +2574,24 @@ Return ONLY a JSON array, no prose, no markdown:
         " " +
         c.notes
       ).toLowerCase();
-      return terms.every((t) => hay.includes(t));
+      return terms.every((t) => {
+        const group = expandSearch ? expandTerm(t) : null;
+        return group ? group.some((s) => hayHas(hay, s)) : hay.includes(t);
+      });
     });
-  }, [contacts, contactQuery, contactTypeFilter]);
+  }, [contacts, contactQuery, contactTypeFilter, expandSearch]);
+
+  // Which search words are being widened, for the hint under the search box.
+  const searchExpansions = useMemo(() => {
+    if (!expandSearch) return [];
+    return contactQuery
+      .trim()
+      .toLowerCase()
+      .split(/\s+/)
+      .filter(Boolean)
+      .map((t) => ({ t, g: expandTerm(t) }))
+      .filter((x) => x.g);
+  }, [contactQuery, expandSearch]);
 
   // Which raw contact `type`s an audience covers by default. Kept separate
   // from the pool filter below so extra types (e.g. REMEMBER) can be
@@ -4351,6 +4391,17 @@ Return ONLY a JSON array: [{"i":0,"line":"..."}]`,
                       }}
                     />
                   </div>
+                  <label
+                    title="켜면 'sustainability' 검색 시 ESG·climate·renewable·친환경 등 관련어가 들어간 회사도 함께 찾습니다"
+                    style={{ display: "flex", alignItems: "center", gap: 5, fontSize: 12, color: C.ink, cursor: "pointer", whiteSpace: "nowrap" }}
+                  >
+                    <input
+                      type="checkbox"
+                      checked={expandSearch}
+                      onChange={(e) => setExpandSearch(e.target.checked)}
+                    />
+                    관련어 포함
+                  </label>
                   {contactTypeFilter !== "ALL" && (
                     <Btn small kind="ghost" onClick={() => setContactTypeFilter("ALL")}>
                       {typeLabel(contactTypeFilter)} 필터 해제
@@ -4370,6 +4421,17 @@ Return ONLY a JSON array: [{"i":0,"line":"..."}]`,
                     {account.staff ? "CSV 내보내기" : "CSV 내보내기 🔒"}
                   </Btn>
                 </div>
+                {searchExpansions.length > 0 && (
+                  <div style={{ padding: "0 16px 10px", fontSize: 11.5, color: C.mute, lineHeight: 1.6 }}>
+                    {searchExpansions.map(({ t, g }) => (
+                      <div key={t}>
+                        <b style={{ color: C.ink }}>{t}</b> → 관련어 함께 검색:{" "}
+                        {g.filter((w) => w !== t).slice(0, 12).join(" · ")}
+                        {g.length > 13 ? " …" : ""}
+                      </div>
+                    ))}
+                  </div>
+                )}
 
                 {/* Matching reads the stored company description and nothing
                     else — an empty one means that contact is scored on its
