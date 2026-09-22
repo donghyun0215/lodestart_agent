@@ -1136,6 +1136,52 @@ async function claudeMatch(systemPrompt, userPrompt, maxTokens = 1600, tries = 0
 
 // Same as claude(), but lets the model look things up on the web. Used only
 // by the note-enrichment job — matching and drafting stay search-free.
+// Web-search answers sometimes carry the model's citation markup inline
+// (<cite index="16-1">…</cite>). It leaked into saved company descriptions
+// and showed up raw in the contact list, so it's stripped everywhere text
+// comes in: on enrichment writes and on every DB load.
+function stripCites(s) {
+  return String(s || "")
+    .replace(/<\/?cite[^>]*>/gi, "")
+    .replace(/\s{2,}/g, " ")
+    .trim();
+}
+
+// Contact-type badges: the type used to be a faint 10px grey label that got
+// truncated ("GOV_AND_AGEN…") — Tammy couldn't tell investors from
+// corporates in search results. Now a coloured pill, never truncated.
+const TYPE_BADGE = {
+  INVESTOR: ["#166534", "#DCFCE7"],
+  CORPORATE: ["#1D4ED8", "#DBEAFE"],
+  GOV_AND_AGENCY: ["#6D28D9", "#EDE9FE"],
+  RESEARCH: ["#0F766E", "#CCFBF1"],
+  STARTUP: ["#C2410C", "#FFEDD5"],
+  LINKEDIN_ONLY: ["#0A66C2", "#E0EFFA"],
+  UNCLASSIFIED: ["#92400E", "#FEF3C7"],
+  OTHERS: ["#4B5563", "#F3F4F6"],
+  TEST: ["#6B7280", "#F9FAFB"],
+};
+function TypeBadge({ type }) {
+  const [fg, bg] = TYPE_BADGE[type] || ["#4B5563", "#F3F4F6"];
+  return (
+    <span
+      style={{
+        display: "inline-block",
+        fontSize: 10,
+        fontWeight: 700,
+        letterSpacing: "0.02em",
+        color: fg,
+        background: bg,
+        borderRadius: 999,
+        padding: "3px 8px",
+        whiteSpace: "nowrap",
+      }}
+    >
+      {(type || "—").replace(/_/g, " ")}
+    </span>
+  );
+}
+
 async function claudeSearch(prompt, maxTokens = 2000, maxSearches = 4, tries = 0) {
   const res = await fetch("/api/claude", {
     method: "POST",
@@ -2182,7 +2228,7 @@ Return ONLY a JSON array, no prose, no markdown:
       const updates = [];
       parsed.forEach((r) => {
         const c = chunk[r.i];
-        const desc = String(r.desc || "").trim();
+        const desc = stripCites(r.desc);
         if (!c) return;
         if (!desc) {
           notFound += 1;
@@ -2268,7 +2314,7 @@ Return ONLY a JSON array, no prose, no markdown:
             title: (r.title || "").trim(),
             country: (r.country || "").trim(),
             type: (r.type || "").trim(),
-            notes: (r.notes || "").trim(),
+            notes: stripCites(r.notes),
             sendable: (r.sendable || "YES").trim(),
           }))
           .filter((c) => c.email)
@@ -4396,19 +4442,8 @@ Return ONLY a JSON array: [{"i":0,"line":"..."}]`,
                         padding: "9px 16px",
                       }}
                      >
-                      <div
-                        style={{
-                          width: 92,
-                          flexShrink: 0,
-                          fontSize: 10,
-                          fontWeight: 600,
-                          color: C.mute,
-                          overflow: "hidden",
-                          textOverflow: "ellipsis",
-                          whiteSpace: "nowrap",
-                        }}
-                      >
-                        {c.type}
+                      <div style={{ width: 118, flexShrink: 0 }}>
+                        <TypeBadge type={c.type} />
                       </div>
                       {/* The description drives matching, so it's shown in
                           the row rather than hidden behind the edit form.
