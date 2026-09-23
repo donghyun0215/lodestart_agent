@@ -46,6 +46,16 @@ body {
 
 @keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
 .spin { animation: spin 1s linear infinite; }
+/* indeterminate top progress bar */
+@keyframes ldBar {
+  0%   { left: -40%; width: 40%; }
+  60%  { left: 100%; width: 60%; }
+  100% { left: 100%; width: 60%; }
+}
+@keyframes ldPillIn {
+  from { opacity: 0; transform: translate(-50%, 8px); }
+  to   { opacity: 1; transform: translate(-50%, 0); }
+}
 @keyframes hoverCardIn {
   from { opacity: 0; transform: translateY(2px) scale(0.985); }
   to   { opacity: 1; transform: none; }
@@ -1136,6 +1146,170 @@ async function claudeMatch(systemPrompt, userPrompt, maxTokens = 1600, tries = 0
 
 // Same as claude(), but lets the model look things up on the web. Used only
 // by the note-enrichment job — matching and drafting stay search-free.
+// ---------------------------------------------------------------------------
+// Activity indicator
+// Many actions wait on the backend for seconds (Claude calls, Gmail pushes,
+// Supabase writes) with no visible change, so people assumed the app froze.
+// Rather than wiring a spinner into every button (and missing some), fetch()
+// is wrapped once: every user-triggered request is counted, and a top
+// progress bar + status pill appear while any are in flight. Background
+// polling (Gmail sync every 45s, auth status) is excluded so the indicator
+// only ever means "the thing you just clicked is working".
+// ---------------------------------------------------------------------------
+const QUIET_REQUESTS = /\/api\/gmail\/sync|\/api\/auth\/status/;
+// Shared on window: if this module is ever evaluated twice (dev reloads,
+// duplicated chunks), the fetch wrapper and the indicator must still talk to
+// the same counter — otherwise the wrapper counts into one object while the
+// indicator listens to another and nothing ever shows.
+const netTracker =
+  typeof window !== "undefined"
+    ? window.__ldNet || (window.__ldNet = { pending: 0, listeners: new Set() })
+    : { pending: 0, listeners: new Set() };
+function netEmit() {
+  netTracker.listeners.forEach((fn) => fn(netTracker.pending));
+}
+if (typeof window !== "undefined" && !window.__ldFetchWrapped) {
+  window.__ldFetchWrapped = true;
+  const origFetch = window.fetch.bind(window);
+  window.fetch = async (...args) => {
+    const url = String((args[0] && args[0].url) || args[0] || "");
+    const counted = !QUIET_REQUESTS.test(url);
+    if (counted) {
+      netTracker.pending++;
+      netEmit();
+    }
+    try {
+      return await origFetch(...args);
+    } finally {
+      if (counted) {
+        netTracker.pending = Math.max(0, netTracker.pending - 1);
+        netEmit();
+      }
+    }
+  };
+}
+
+// What each busy state means, in words the user recognises.
+const BUSY_LABELS = {
+  loadContacts: "컨택 DB 불러오는 중",
+  uploadContacts: "CSV를 DB에 올리는 중",
+  addContact: "컨택 추가하는 중",
+  contact: "컨택 저장하는 중",
+  undo: "되돌리는 중",
+  match: "AI 매칭 채점 중",
+  draft: "AI가 초안 작성 중",
+  showcase: "쇼케이스 초안 생성 중",
+  showcaseImport: "원페이저 링크 읽는 중",
+  extract: "IR 자료 읽는 중",
+  enrich: "웹에서 회사 정보 조사 중",
+  push: "Gmail 초안함에 넣는 중",
+  send: "메일 발송 중",
+};
+// Actions that legitimately take minutes get an extra reassurance line.
+const LONG_BUSY = new Set(["match", "draft", "showcase", "enrich", "uploadContacts"]);
+
+function ActivityIndicator({ busy, progress }) {
+  const [pending, setPending] = React.useState(netTracker.pending);
+  const [visible, setVisible] = React.useState(false);
+  const [elapsed, setElapsed] = React.useState(0);
+  const startRef = React.useRef(0);
+
+  React.useEffect(() => {
+    netTracker.listeners.add(setPending);
+    return () => netTracker.listeners.delete(setPending);
+  }, []);
+
+  const active = !!busy || pending > 0;
+
+  // Show after 250ms so instant responses don't flash; hide immediately.
+  React.useEffect(() => {
+    if (!active) {
+      setVisible(false);
+      return;
+    }
+    const t = setTimeout(() => {
+      startRef.current = Date.now();
+      setElapsed(0);
+      setVisible(true);
+    }, 250);
+    return () => clearTimeout(t);
+  }, [active]);
+
+  React.useEffect(() => {
+    if (!visible) return;
+    const t = setInterval(() => setElapsed(Math.floor((Date.now() - startRef.current) / 1000)), 1000);
+    return () => clearInterval(t);
+  }, [visible]);
+
+  React.useEffect(() => {
+    if (typeof document === "undefined") return;
+    document.body.style.cursor = visible ? "progress" : "";
+    return () => {
+      document.body.style.cursor = "";
+    };
+  }, [visible]);
+
+  if (!visible) return null;
+  const key = String(busy || "").replace(/\d+$/, "");
+  const label = BUSY_LABELS[key] || (busy ? "처리 중" : "서버와 통신 중");
+  const showPct = !!busy && progress > 0 && progress < 100;
+
+  return (
+    <>
+      <div
+        aria-hidden
+        style={{ position: "fixed", top: 0, left: 0, right: 0, height: 3, zIndex: 200, overflow: "hidden", background: "rgba(35,89,74,0.15)" }}
+      >
+        <div
+          style={{
+            position: "absolute",
+            top: 0,
+            bottom: 0,
+            background: "linear-gradient(90deg, #23594A, #A8842F)",
+            animation: "ldBar 1.4s ease-in-out infinite",
+          }}
+        />
+      </div>
+      <div
+        role="status"
+        aria-live="polite"
+        style={{
+          position: "fixed",
+          left: "50%",
+          bottom: 24,
+          transform: "translateX(-50%)",
+          zIndex: 200,
+          display: "flex",
+          alignItems: "center",
+          gap: 10,
+          padding: "10px 16px",
+          borderRadius: 999,
+          background: "#0C1A2A",
+          color: "#F4F7F9",
+          fontFamily: "Inter, sans-serif",
+          fontSize: 13,
+          boxShadow: "0 8px 24px rgba(12,26,42,0.28)",
+          animation: "ldPillIn .18s ease both",
+          maxWidth: "92vw",
+        }}
+      >
+        <Loader2 size={15} className="spin" color="#C09A3E" />
+        <span style={{ fontWeight: 600 }}>
+          {label}…{showPct ? ` ${progress}%` : ""}
+        </span>
+        {elapsed >= 3 && (
+          <span style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 11.5, color: "#9FB0C0" }}>
+            {elapsed}초
+          </span>
+        )}
+        {elapsed >= 8 && LONG_BUSY.has(key) && (
+          <span style={{ fontSize: 11.5, color: "#9FB0C0" }}>· 몇 분 걸릴 수 있어요, 창을 닫지 마세요</span>
+        )}
+      </div>
+    </>
+  );
+}
+
 // Web-search answers sometimes carry the model's citation markup inline
 // (<cite index="16-1">…</cite>). It leaked into saved company descriptions
 // and showed up raw in the contact list, so it's stripped everywhere text
@@ -6626,6 +6800,7 @@ Return ONLY a JSON array: [{"i":0,"line":"..."}]`,
       {selectedLog && (
         <LogDetailModal entry={selectedLog} onClose={() => setSelectedLog(null)} />
       )}
+      <ActivityIndicator busy={busy} progress={progress} />
     </div>
   );
 }
