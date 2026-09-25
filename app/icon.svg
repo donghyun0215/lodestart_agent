@@ -1,0 +1,26 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+  <defs>
+    <linearGradient id="tile" x1="0" y1="0" x2="64" y2="64" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#15304A"/>
+      <stop offset="1" stop-color="#0C1A2A"/>
+    </linearGradient>
+    <linearGradient id="star" x1="14" y1="10" x2="50" y2="54" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#F4E7BC"/>
+      <stop offset=".5" stop-color="#C09A3E"/>
+      <stop offset="1" stop-color="#8AB79F"/>
+    </linearGradient>
+    <radialGradient id="glow" cx="32" cy="32" r="20" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#C09A3E" stop-opacity=".45"/>
+      <stop offset="1" stop-color="#C09A3E" stop-opacity="0"/>
+    </radialGradient>
+  </defs>
+  <rect x=".75" y=".75" width="62.5" height="62.5" rx="14.5" fill="url(#tile)" stroke="#2C4B68" stroke-width="1.5"/>
+  <circle cx="32" cy="32" r="20" fill="url(#glow)"/>
+  <!-- orbit ring, broken like a compass bearing -->
+  <circle cx="32" cy="32" r="23.5" fill="none" stroke="#23594A" stroke-width="2.4"
+          stroke-dasharray="118 30" transform="rotate(-62 32 32)" stroke-linecap="round"/>
+  <!-- four-point lodestar -->
+  <path d="M32 7 L36.2 27.8 L57 32 L36.2 36.2 L32 57 L27.8 36.2 L7 32 L27.8 27.8 Z" fill="url(#star)"/>
+  <!-- satellite on the orbit -->
+  <circle cx="51.2" cy="17.8" r="3.2" fill="#F4E7BC"/>
+</svg>
