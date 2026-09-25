@@ -1,10 +1,10 @@
-# Codemap — lodestart_agent
+# Codemap — repo
 
 Read this first, then open only the files the task touches. Regenerate with
 `python3 scripts/codemap.py .` after adding routes, tables, or env vars.
 
-- Generated at: 056cec5 2026-09-07 Log rows open a detail modal: per-column before/after diffs
-- Files mapped: 25 · code LOC: 7,985
+- Generated at: 80a0f2a 2026-09-23 Global activity indicator for backend actions
+- Files mapped: 29 · code LOC: 8,442
 - Scripts: `dev`, `build`, `start`
 - Deps: @radix-ui/react-hover-card, @supabase/supabase-js, lucide-react, next, papaparse, react, react-dom
 
@@ -31,7 +31,7 @@ Read this first, then open only the files the task touches. Regenerate with
 - `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`, `GOOGLE_REDIRECT_URI`, `NEXT_PUBLIC_SUPABASE_URL`, `NEXT_PUBLIC_SUPABASE_ANON_KEY`, `ANTHROPIC_API_KEY`, `STAFF_EMAIL_DOMAINS`, `STAFF_EMAIL_ALLOWLIST`, `DELETE_ALLOWED_EMAILS`
 
 ## Biggest files (open these surgically — grep for the symbol, don't cat)
-- app/page.jsx — 6487 LOC
+- app/page.jsx — 6806 LOC
 - scripts/codemap.py — 165 LOC
 - app/api/gmail/draft/route.js — 154 LOC
 - app/api/gmail/sync/route.js — 138 LOC
@@ -62,7 +62,10 @@ Read this first, then open only the files the task touches. Regenerate with
 
 ## Tree (depth 3)
 ```
+AGENTS.md
 DEPLOY_GUIDE.md
+aidlc-docs/
+  codemap.md
 app/
   api/
     auth/
@@ -78,9 +81,11 @@ lib/
   supabase.js
 migration_contact_logs.sql
 migration_final_types.sql
+migration_linkedin_only.sql
 migration_merge_institution.sql
 migration_merge_vc.sql
 migration_rename_types.sql
+migration_strip_cites.sql
 migration_taxonomy_v3.sql
 next.config.js
 package.json
